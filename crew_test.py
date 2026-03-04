@@ -300,6 +300,80 @@ def desensitize_for_llm(text: str) -> str:
     return out
 
 
+_DEFAULT_GLOSSARY_TERMS: list[str] = [
+    "Apple Pay",
+    "Wi Fi",
+    "End This Live",
+    "Co-host",
+]
+
+
+def _extract_glossary_terms(text: str) -> list[str]:
+    """从文本中的 Glossary 段落解析专有名词词汇表。
+
+    约定格式：
+    ## Glossary（专有名词词汇表）
+    - Apple Pay
+    - Wi Fi
+    ...
+    """
+    if not text:
+        return []
+    lines = text.splitlines()
+    in_section = False
+    terms: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("##") and "Glossary" in s:
+            in_section = True
+            continue
+        if in_section:
+            if s.startswith("##") and "Glossary" not in s:
+                break
+            if s.startswith("- "):
+                term = s[2:].strip()
+                if term and term not in terms:
+                    terms.append(term)
+    return terms
+
+
+def _build_glossary_mapping(terms: list[str]) -> dict[str, str]:
+    """根据词表构建占位符映射：term -> __GLOSSARY_N__，长词优先。"""
+    mapping: dict[str, str] = {}
+    if not terms:
+        return mapping
+    unique_terms: list[str] = []
+    for t in terms:
+        if t and t not in unique_terms:
+            unique_terms.append(t)
+    # 长词在前，避免子串覆盖
+    unique_terms.sort(key=len, reverse=True)
+    for idx, term in enumerate(unique_terms, start=1):
+        token = f"__GLOSSARY_{idx}__"
+        mapping[term] = token
+    return mapping
+
+
+def _apply_glossary_preprocess(text: str, mapping: dict[str, str]) -> str:
+    """在传给 Agent 前，将专有名词替换为占位符。"""
+    if not text or not mapping:
+        return text
+    out = text
+    for term, token in mapping.items():
+        out = out.replace(term, token)
+    return out
+
+
+def _apply_glossary_postprocess(text: str, mapping: dict[str, str]) -> str:
+    """在 Agent 输出后，将占位符替换回原始专有名词。"""
+    if not text or not mapping:
+        return text
+    out = text
+    for term, token in mapping.items():
+        out = out.replace(token, term)
+    return out
+
+
 def load_demand(file_path: str | None) -> str:
     """从文件或环境变量或默认值加载需求文本。优先：文件 > 环境变量 DEMAND > 默认字符串。"""
     if file_path and os.path.isfile(file_path):
@@ -633,6 +707,21 @@ def _parse_markdown_tables(text: str) -> list[list[list[str]]]:
     return []
 
 
+def _table_to_markdown(table: list[list[str]]) -> str:
+    """将单个表格（含表头）转为标准 Markdown 表格字符串。"""
+    if not table:
+        return ""
+    header = table[0]
+    rows = table[1:] if len(table) > 1 else []
+    line_header = "| " + " | ".join(str(c or "").strip() for c in header) + " |"
+    line_sep = "| " + " | ".join("---" for _ in header) + " |"
+    lines = [line_header, line_sep]
+    for r in rows:
+        line = "| " + " | ".join(str(c or "").strip() for c in r) + " |"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _parse_markdown_tables_inner(text: str) -> list[list[list[str]]]:
     """内部解析逻辑：严格按行解析 Markdown 表格。"""
     tables: list[list[list[str]]] = []
@@ -663,6 +752,218 @@ def _parse_markdown_tables_inner(text: str) -> list[list[list[str]]]:
         if rows:
             tables.append(rows)
     return tables
+
+
+def _compute_next_id_from_table(table: list[list[str]]) -> str:
+    """从用例表中计算下一个可用用例 ID（按首列，取最后一条非空 ID）。"""
+    if not table or len(table) < 2:
+        raise ValueError("用例表为空，无法计算下一用例 ID")
+    data_rows = table[1:]
+    last_id = ""
+    for r in data_rows:
+        if not r:
+            continue
+        cid = str(r[0] or "").strip()
+        if cid:
+            last_id = cid
+    if not last_id:
+        raise ValueError("未找到任何已有用例 ID，无法计算下一用例 ID")
+    m = re.match(r"^(.*?)(\d+)$", last_id)
+    if not m:
+        raise ValueError(f"无法解析用例 ID: {last_id}")
+    prefix, num = m.group(1), m.group(2)
+    width = len(num)
+    next_num = str(int(num) + 1).zfill(width)
+    return f"{prefix}{next_num}"
+
+
+def generate_incremental_cases(
+    prd_text: str,
+    base_cases_md: str,
+    instruction: str,
+    gemini_key: str,
+    gemini_model: str | None = None,
+) -> dict[str, Any]:
+    """增量用例生成：在原始 PRD + 基线用例表基础上，基于增量指令生成仅包含新增场景的 Markdown 表格。
+
+    返回:
+      {
+        "ok": bool,
+        "error": str | None,
+        "delta_md": str,      # 增量用例 Markdown 表格（单表）
+        "next_id_start": str, # 本次使用的起始 ID
+      }
+    """
+    prd = (prd_text or "").strip()
+    base_md = (base_cases_md or "").strip()
+    instr = (instruction or "").strip()
+    if not prd:
+        return {"ok": False, "error": "原始需求文本为空", "delta_md": "", "next_id_start": ""}
+    if not base_md:
+        return {"ok": False, "error": "基线用例表为空，无法做增量补充", "delta_md": "", "next_id_start": ""}
+    if not instr:
+        return {"ok": False, "error": "请先填写补充说明/变更描述", "delta_md": "", "next_id_start": ""}
+
+    tables = _parse_markdown_tables(base_md)
+    if not tables:
+        return {"ok": False, "error": "未能从基线用例中解析出表格", "delta_md": "", "next_id_start": ""}
+    base_table = tables[0]
+    if len(base_table) < 2:
+        return {"ok": False, "error": "基线用例表数据行为空，无法做增量补充", "delta_md": "", "next_id_start": ""}
+    header = [str(c or "").strip() for c in base_table[0]]
+    expected_header = ["ID", "模块", "测试项", "优先级", "前置条件", "操作步骤", "预期结果"]
+    if header != expected_header:
+        return {
+            "ok": False,
+            "error": "基线用例表头不符合规范，预期为：ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果",
+            "delta_md": "",
+            "next_id_start": "",
+        }
+
+    try:
+        next_id = _compute_next_id_from_table(base_table)
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "delta_md": "", "next_id_start": ""}
+
+    # 构造增量 Agent Prompt：强调只输出 Delta + ID 强约束
+    base_cases_preview = base_md[:20000]
+    prompt = []
+    prompt.append("你是一位资深高级全栈测试开发专家。")
+    prompt.append("你已拥有以下信息：")
+    prompt.append("1. 《原始需求》全文")
+    prompt.append("2. 《现有测试用例》表格")
+    prompt.append("3. 用户提供的《增量指令》")
+    prompt.append("4. Python 注入的下一可用 ID 起始值")
+    prompt.append("")
+    prompt.append("你的唯一任务：在不破坏现有用例逻辑的前提下，为新增或变更部分补充测试用例。")
+    prompt.append("")
+    prompt.append("=== 原始需求全文 ===")
+    prompt.append(prd)
+    prompt.append("")
+    prompt.append("=== 现有测试用例表格（基线） ===")
+    prompt.append(base_cases_preview)
+    prompt.append("")
+    prompt.append("=== 增量指令（仅描述新增/变更部分） ===")
+    prompt.append(instr)
+    prompt.append("")
+    prompt.append("=== 重要规则（必须严格遵守） ===")
+    prompt.append("1. 只输出【增量/Delta】部分，绝对不允许输出任何已经存在的用例！")
+    prompt.append("2. 输出格式必须为 Markdown 表格，表头严格为：| ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果 |。")
+    prompt.append("3. 中英/数字边界不得出现空格，例如：点击Save按钮。英文内部保留原始空格。")
+    prompt.append("4. 预期结果绝对去动词化：不得出现“点击”“查看”等动作词，仅描述状态/展示/置灰等；多条预期结果时分行并使用 1. 2. 编号，单条时禁止前置编号。")
+    prompt.append("5. 必须显式对比现有测试用例，严禁重复已有场景。")
+    prompt.append("6. 必须考虑断网、杀进程、边界值等极端场景，以及新逻辑对既有流程的潜在回归风险。")
+    prompt.append("7. 若发现增量指令引入的新行为与原用例中已有行为存在冲突，必须补充回归/冲突验证用例。")
+    prompt.append("")
+    prompt.append("=== ID 强继承要求（非常重要） ===")
+    prompt.append(f"- Python 注入的下一可用 ID 起始值为：{next_id}")
+    prompt.append("- 你产出的第一条用例的 ID 必须严格等于上述起始值；后续用例 ID 必须在数字部分上递增 1。")
+    prompt.append("")
+    prompt.append("请只输出一张符合上述表头与规范的 Markdown 表格，不要输出任何其他解释文字。")
+    full_prompt = "\n".join(prompt)
+
+    key = (gemini_key or "").strip() or os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        return {"ok": False, "error": "未配置 Gemini API Key", "delta_md": "", "next_id_start": ""}
+    model_name = _resolve_gemini_model((gemini_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")) or "")
+
+    # 增量场景下的 Glossary 占位符保护
+    glossary_terms = list(_DEFAULT_GLOSSARY_TERMS)
+    glossary_terms.extend(_extract_glossary_terms(prd_text))
+    glossary_mapping = _build_glossary_mapping(glossary_terms)
+    if glossary_mapping:
+        prompt_for_llm = _apply_glossary_preprocess(full_prompt, glossary_mapping)
+    else:
+        prompt_for_llm = full_prompt
+
+    try:
+        llm = _build_gemini_llm(model_name, key, cached_content_name="")
+        resp = llm.invoke(prompt_for_llm)
+        out = (getattr(resp, "content", None) or str(resp) or "").strip()
+    except Exception as e:
+        return {"ok": False, "error": f"增量 Agent 调用失败：{e}", "delta_md": "", "next_id_start": ""}
+
+    if glossary_mapping:
+        out = _apply_glossary_postprocess(out, glossary_mapping)
+
+    if not out:
+        return {"ok": False, "error": "增量 Agent 返回为空", "delta_md": "", "next_id_start": ""}
+
+    delta_tables = _parse_markdown_tables(out)
+    if not delta_tables:
+        return {"ok": False, "error": "未能从增量 Agent 输出中解析出表格", "delta_md": "", "next_id_start": ""}
+    delta_table = delta_tables[0]
+    if len(delta_table) < 2:
+        return {"ok": False, "error": "增量用例表数据行为空", "delta_md": "", "next_id_start": ""}
+    delta_header = [str(c or "").strip() for c in delta_table[0]]
+    if delta_header != expected_header:
+        return {
+            "ok": False,
+            "error": "增量用例表头不符合规范，预期为：ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果",
+            "delta_md": "",
+            "next_id_start": "",
+        }
+
+    # ID 合法性与冲突校验
+    base_ids = set()
+    for r in base_table[1:]:
+        if not r:
+            continue
+        cid = str(r[0] or "").strip()
+        if cid:
+            base_ids.add(cid)
+    new_ids: list[str] = []
+    for r in delta_table[1:]:
+        if not r:
+            continue
+        cid = str(r[0] or "").strip()
+        if not cid:
+            return {"ok": False, "error": "增量用例中存在空 ID", "delta_md": "", "next_id_start": ""}
+        new_ids.append(cid)
+    if not new_ids:
+        return {"ok": False, "error": "增量用例列表为空", "delta_md": "", "next_id_start": ""}
+    if len(new_ids) != len(set(new_ids)):
+        return {"ok": False, "error": "增量用例中存在重复 ID", "delta_md": "", "next_id_start": ""}
+    if any(i in base_ids for i in new_ids):
+        return {"ok": False, "error": "增量用例 ID 与基线用例存在冲突", "delta_md": "", "next_id_start": ""}
+
+    # 检查首条 ID 是否等于 next_id，后续是否逐条递增
+    if new_ids[0] != next_id:
+        return {"ok": False, "error": f"首条增量用例 ID 必须为 {next_id}，实际为 {new_ids[0]}", "delta_md": "", "next_id_start": ""}
+    try:
+        m0 = re.match(r"^(.*?)(\d+)$", next_id)
+        assert m0 is not None
+        prefix0, num0 = m0.group(1), int(m0.group(2))
+        for idx, cid in enumerate(new_ids):
+            m = re.match(r"^(.*?)(\d+)$", cid)
+            if not m:
+                raise ValueError(f"增量用例 ID 格式不合法：{cid}")
+            prefix, num = m.group(1), int(m.group(2))
+            expected_num = num0 + idx
+            if prefix != prefix0 or num != expected_num:
+                raise ValueError(f"增量用例 ID 序列不连续，预期前缀 {prefix0} 且递增，错误 ID：{cid}")
+    except Exception as e:
+        return {"ok": False, "error": f"增量用例 ID 序列校验失败：{e}", "delta_md": "", "next_id_start": ""}
+
+    # 粗略重复检测：按 (模块, 测试项, 操作步骤) 与基线比对，避免明显重复场景
+    def _row_key(row: list[str]) -> str:
+        vals = [str(v or "").strip() for v in row]
+        while len(vals) < 7:
+            vals.append("")
+        return "|".join([vals[1], vals[2], vals[5]])  # 模块 | 测试项 | 操作步骤
+
+    base_keys = {_row_key(r) for r in base_table[1:] if r}
+    dup_rows = [r for r in delta_table[1:] if r and _row_key(r) in base_keys]
+    if dup_rows:
+        return {"ok": False, "error": "增量用例中存在与基线用例重复的场景，请优化增量指令后重试", "delta_md": "", "next_id_start": ""}
+
+    delta_md = _table_to_markdown(delta_table)
+    return {
+        "ok": True,
+        "error": None,
+        "delta_md": delta_md,
+        "next_id_start": next_id,
+    }
 
 
 def _sanitize_cell_for_excel(value: Any) -> str:
@@ -961,11 +1262,24 @@ def run_pipeline(
         )
 
     use_config = bool(agents_config_path or os.path.isfile(AGENTS_CONFIG_PATH))
-    proj_ctx = project_context if project_context is not None else get_project_context_for_agent()
+    proj_ctx_raw = project_context if project_context is not None else get_project_context_for_agent()
     stream = return_details
 
     # 入参脱敏：仅对传入大模型的内容做掩码处理，本地保存仍保留原始需求文本
-    llm_demand = desensitize_for_llm(demand)
+    llm_demand_raw = desensitize_for_llm(demand)
+    proj_ctx = (proj_ctx_raw or "").strip()
+
+    # Glossary 词表：默认词表 + Project Context 中的 Glossary 段落
+    glossary_terms: list[str] = list(_DEFAULT_GLOSSARY_TERMS)
+    glossary_terms.extend(_extract_glossary_terms(proj_ctx))
+    glossary_mapping = _build_glossary_mapping(glossary_terms)
+
+    if glossary_mapping:
+        proj_ctx_for_llm = _apply_glossary_preprocess(proj_ctx, glossary_mapping)
+        llm_demand_for_llm = _apply_glossary_preprocess(llm_demand_raw, glossary_mapping)
+    else:
+        proj_ctx_for_llm = proj_ctx
+        llm_demand_for_llm = llm_demand_raw
     step_outputs: list[dict[str, str]] = []
     sheets_url: str | None = None
     excel_path: str | None = None
@@ -977,10 +1291,16 @@ def run_pipeline(
         # 采用顺序执行 + inputs 占位符注入（见 docs/四Agent任务编排-开发实施文档）
         result_str, step_outputs = _run_crew_sequential(
             config,
-            proj_ctx,
-            llm_demand,
+            proj_ctx_for_llm,
+            llm_demand_for_llm,
             stream=stream,
         )
+        # Glossary 反向替换，恢复专有名词原始形态
+        if glossary_mapping:
+            result_str = _apply_glossary_postprocess(result_str, glossary_mapping)
+            for s in step_outputs:
+                content = s.get("content", "")
+                s["content"] = _apply_glossary_postprocess(content, glossary_mapping)
         if not stream:
             print("需求摘要:", demand[:200] + ("..." if len(demand) > 200 else ""))
             print()

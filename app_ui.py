@@ -23,6 +23,8 @@ from crew_test import (
     _parse_markdown_tables,
     _resolve_gemini_model,
     chat_with_document_agent,
+    export_tables_to_excel_bytes,
+    generate_incremental_cases,
     get_project_context_for_agent,
     load_agents_config,
     load_project_memory,
@@ -326,6 +328,168 @@ def _load_workbench_apps(T: dict) -> list[dict]:
 
 def _get_module_state_key(module_id: str, suffix: str) -> str:
     return f"app_{module_id}_{suffix}"
+
+
+def _parse_cases_md_to_rows(cases_md: str) -> list[list[str]]:
+    """将 Markdown 用例表解析为行列表（含表头），无表或解析失败返回空列表。"""
+    if not (cases_md or "").strip():
+        return []
+    tables = _parse_markdown_tables(cases_md)
+    if not tables:
+        return []
+    return tables[0]
+
+
+def _rows_to_df_like(rows: list[list[str]]) -> list[dict[str, str]]:
+    """将表格行转换为 DataFrame-like 结构（list[dict]），首行为表头。"""
+    if not rows or len(rows) < 2:
+        return []
+    header = [str(c or "").strip() for c in rows[0]]
+    data_rows = rows[1:]
+    df_like: list[dict[str, str]] = []
+    for r in data_rows:
+        row_dict: dict[str, str] = {}
+        for idx, col in enumerate(header):
+            val = str(r[idx] if idx < len(r) else "").strip()
+            row_dict[col] = val
+        df_like.append(row_dict)
+    return df_like
+
+
+def _update_cases_state_from_md(prd_text: str, cases_md: str) -> None:
+    """根据主流程生成的用例 Markdown 更新 session_state 中的当前/基线用例状态。"""
+    rows = _parse_cases_md_to_rows(cases_md)
+    if not rows:
+        return
+    df_like = _rows_to_df_like(rows)
+    if not df_like:
+        return
+    # 当前与基线表
+    st.session_state["current_cases_md"] = cases_md
+    st.session_state["base_cases_md"] = cases_md
+    st.session_state["current_cases_df"] = df_like
+    st.session_state["base_cases_df"] = list(df_like)
+    # 增量相关状态重置
+    st.session_state["delta_cases_md"] = ""
+    st.session_state["delta_cases_df"] = None
+    st.session_state["incremental_last_instruction"] = ""
+    st.session_state["incremental_last_error"] = ""
+    st.session_state["current_prd_text"] = (prd_text or "").strip()
+    # 重新计算当前 Excel bytes（用于后续导出全量用例）
+    tables = _parse_markdown_tables(cases_md) or []
+    if tables:
+        excel_bytes = export_tables_to_excel_bytes(tables)
+        if excel_bytes:
+            st.session_state["current_cases_excel_bytes"] = excel_bytes
+
+
+def _render_incremental_section(T: dict, defaults: dict) -> None:
+    """在主流程结果页下方渲染『用例补充（增量生成）』区块。"""
+    cases_md = (st.session_state.get("current_cases_md") or "").strip()
+    prd_text = (st.session_state.get("current_prd_text") or "").strip()
+    if not cases_md or not prd_text:
+        return
+
+    st.divider()
+    st.subheader("用例补充（增量生成）")
+    st.caption(
+        "在已有用例基础上，根据小范围需求变更补充新增场景。只输出增量用例，不重写整表。"
+    )
+
+    last_instr = st.session_state.get("incremental_last_instruction", "")
+    instruction = st.text_area(
+        "补充说明/变更描述",
+        value=last_instr,
+        height=120,
+        key="incremental_instruction",
+    ).strip()
+
+    last_err = st.session_state.get("incremental_last_error", "")
+    if last_err:
+        st.error(last_err)
+
+    col_gen, _ = st.columns([1, 2])
+    with col_gen:
+        if st.button("生成补充用例", key="incremental_generate"):
+            st.session_state["incremental_last_instruction"] = instruction
+            out = generate_incremental_cases(
+                prd_text=prd_text,
+                base_cases_md=cases_md,
+                instruction=instruction,
+                gemini_key=defaults.get("gemini_key", ""),
+                gemini_model=defaults.get("gemini_model", ""),
+            )
+            if not out.get("ok"):
+                st.session_state["incremental_last_error"] = str(out.get("error") or "增量生成失败")
+            else:
+                delta_md = str(out.get("delta_md") or "").strip()
+                delta_rows = _parse_cases_md_to_rows(delta_md)
+                delta_df = _rows_to_df_like(delta_rows)
+                if not delta_df:
+                    st.session_state["incremental_last_error"] = "增量用例解析失败"
+                else:
+                    st.session_state["delta_cases_md"] = delta_md
+                    st.session_state["delta_cases_df"] = delta_df
+                    st.session_state["incremental_last_error"] = ""
+
+    delta_df = st.session_state.get("delta_cases_df")
+    delta_md = (st.session_state.get("delta_cases_md") or "").strip()
+    if not delta_df or not delta_md:
+        return
+
+    st.markdown("---")
+    st.markdown("**增量用例表（仅新增场景）**")
+    st.dataframe(delta_df, use_container_width=True)
+
+    # 导出增量用例 Excel
+    delta_tables = _parse_markdown_tables(delta_md) or []
+    delta_excel_bytes = export_tables_to_excel_bytes(delta_tables) if delta_tables else None
+    if delta_excel_bytes:
+        st.download_button(
+            "📥 导出补充用例为 Excel",
+            data=delta_excel_bytes,
+            file_name="增量补充用例.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_incremental_delta",
+        )
+
+    col_merge, col_discard = st.columns(2)
+    with col_merge:
+        if st.button("合并至总用例库", key="incremental_merge"):
+            base_rows = _parse_cases_md_to_rows(cases_md)
+            d_rows = _parse_cases_md_to_rows(delta_md)
+            if not base_rows or not d_rows:
+                st.error("合并失败：基线或增量用例表无法解析。")
+            else:
+                base_header = [str(c or "").strip() for c in base_rows[0]]
+                delta_header = [str(c or "").strip() for c in d_rows[0]]
+                if base_header != delta_header:
+                    st.error("合并失败：增量用例表头与基线不一致，已阻止合并。")
+                else:
+                    merged_rows = [base_rows[0]] + base_rows[1:] + d_rows[1:]
+                    # 通过 crew_test 的导出逻辑重新生成 Markdown
+                    header_line = "| " + " | ".join(base_header) + " |"
+                    sep_line = "| " + " | ".join("---" for _ in base_header) + " |"
+                    body_lines = []
+                    for r in merged_rows[1:]:
+                        line = "| " + " | ".join(str(c or "").strip() for c in r) + " |"
+                        body_lines.append(line)
+                    merged_md = "\n".join([header_line, sep_line] + body_lines)
+                    st.session_state["current_cases_md"] = merged_md
+                    _update_cases_state_from_md(prd_text, merged_md)
+                    # 清空增量状态
+                    st.session_state["delta_cases_md"] = ""
+                    st.session_state["delta_cases_df"] = None
+                    st.success("已合并至总用例库。后续导出将包含本次补充用例。")
+                    st.experimental_rerun()
+
+    with col_discard:
+        if st.button("丢弃本次增量", key="incremental_discard"):
+            st.session_state["delta_cases_md"] = ""
+            st.session_state["delta_cases_df"] = None
+            st.session_state["incremental_last_error"] = ""
+            st.success("已丢弃本次增量。")
+
 
 
 def _build_agents_snapshot(agents: list, tasks: list) -> dict:
@@ -869,6 +1033,11 @@ def _render_paste_mode(T: dict, defaults: dict):
                         )
                     except Exception:
                         pass
+                    # 更新当前用例状态（供增量生成使用）
+                    try:
+                        _update_cases_state_from_md(pasted, str(result.get("cases_md") or ""))
+                    except Exception:
+                        pass
             except Exception as e:
                 st.session_state[_paste_error_key] = str(e)
                 st.error(str(e))
@@ -892,7 +1061,7 @@ def _render_paste_mode(T: dict, defaults: dict):
     st.subheader("新测试用例表")
     st.markdown(r.get("cases_md", "") or "*（无）*")
 
-    excel_bytes = r.get("excel_bytes")
+    excel_bytes = st.session_state.get("current_cases_excel_bytes") or r.get("excel_bytes")
     if excel_bytes:
         st.download_button(
             "📥 下载 Excel",
@@ -903,6 +1072,12 @@ def _render_paste_mode(T: dict, defaults: dict):
         )
     else:
         st.caption("未解析到 Markdown 表格，无法导出 Excel。")
+
+    # 用例补充（增量生成）
+    _render_incremental_section(T, defaults)
+
+    # 用例补充（增量生成）
+    _render_incremental_section(T, defaults)
 
 
 def _render_upload_mode(T: dict, defaults: dict):
@@ -1048,6 +1223,11 @@ def _render_upload_mode(T: dict, defaults: dict):
                         )
                     except Exception:
                         pass
+                    # 更新当前用例状态（供增量生成使用）
+                    try:
+                        _update_cases_state_from_md(demand_md, str(result.get("cases_md") or ""))
+                    except Exception:
+                        pass
             except Exception as e:
                 st.session_state[_upload_error_key] = str(e)
                 st.error(str(e))
@@ -1071,7 +1251,7 @@ def _render_upload_mode(T: dict, defaults: dict):
     st.subheader("新测试用例表")
     st.markdown(r.get("cases_md", "") or "*（无）*")
 
-    excel_bytes = r.get("excel_bytes")
+    excel_bytes = st.session_state.get("current_cases_excel_bytes") or r.get("excel_bytes")
     if excel_bytes:
         st.download_button(
             "📥 下载 Excel",
