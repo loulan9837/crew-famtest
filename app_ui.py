@@ -254,7 +254,9 @@ def _parse_design_image_with_gemini(
         from langchain_core.messages import HumanMessage
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        raw_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+        # 设计图解析专用免费模型：优先使用 GEMINI_FREE_VISION_MODEL，其次回退到一个约定的免费模型名，
+        # 不受全局 GEMINI_MODEL / defaults['gemini_model'] 影响。
+        raw_model = os.environ.get("GEMINI_FREE_VISION_MODEL", "gemini-2.5-flash-lite")
         model = _resolve_gemini_model(raw_model)
         llm = ChatGoogleGenerativeAI(model=model, google_api_key=key, temperature=0.1)
 
@@ -558,6 +560,24 @@ def _handle_full_regression_import(
         st.success(f"已导入 {rows} 行，其中新增 {added_rows} 行，全回归聚合用例已更新。")
     else:
         st.success(f"已导入 {rows} 行，全回归聚合用例已更新。")
+
+
+def _find_latest_design_import_time(file_hash_prefix: str, project_id: str | None = None) -> str | None:
+    """根据 design_mockup 条目的 source_id 前缀查找最近一次导入时间。"""
+    try:
+        from memory_store import list_recent, DESIGN_MOCKUP_SOURCE_TYPE
+    except ImportError:
+        return None
+    all_recent = list_recent(limit=200, project_id=project_id)
+    ts = [
+        e.get("created_at")
+        for e in all_recent
+        if e.get("source_type") == DESIGN_MOCKUP_SOURCE_TYPE
+        and str(e.get("source_id", "")).startswith(file_hash_prefix[:8])
+    ]
+    if not ts:
+        return None
+    return sorted(str(t or "") for t in ts if t) [-1]
 
 
 def _render_incremental_section(T: dict, defaults: dict) -> None:
@@ -2055,10 +2075,10 @@ def _render_module_memory(T: dict, defaults: dict):
 
         design_upload_result = render_file_uploader(
             accepted_types=["png", "jpg", "jpeg", "pdf", "zip"],
-            max_size_mb=400,
+            max_size_mb=500,
             key="design_mockup_upload",
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤400MB）",
+            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤500MB）",
         )
         if design_upload_result:
             # 兼容组件返回结构：
@@ -2075,7 +2095,7 @@ def _render_module_memory(T: dict, defaults: dict):
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤400MB）",
+            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤500MB）",
             type=["png", "jpg", "jpeg", "pdf", "zip"],
             key="design_mockup_upload",
             accept_multiple_files=True,
@@ -2122,7 +2142,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
 
-            # 展开 zip：用户可以上传一个大型 zip 包含多张 PNG/JPG
+            # 展开 zip：用户可以上传一个包含多张 PNG/JPG/PDF 的 zip
             expanded_files: list[_MemoryUpload] = []
             from io import BytesIO
             import zipfile
@@ -2146,7 +2166,7 @@ def _render_module_memory(T: dict, defaults: dict):
                             continue
                         inner_name = zi.filename.rsplit("/", 1)[-1]
                         inner_ext = inner_name.lower().rsplit(".", 1)[-1] if "." in inner_name else ""
-                        if inner_ext not in ("png", "jpg", "jpeg"):
+                        if inner_ext not in ("png", "jpg", "jpeg", "pdf"):
                             continue
                         if image_count >= MAX_IMAGES_FROM_ARCHIVES:
                             break
@@ -2161,26 +2181,30 @@ def _render_module_memory(T: dict, defaults: dict):
                     expanded_files.append(f)
 
             if not expanded_files:
-                st.error("ZIP 中未找到可用的 PNG/JPG 设计图")
+                st.error("ZIP 中未找到可用的 PNG/JPG/PDF 设计图")
                 return
 
-            # 实际处理的文件列表：限制单次最多 500 个，避免极端大包拖垮前端
+            # 实际处理的文件列表：限制单次最多 MAX_IMAGES_FROM_ARCHIVES 个
             files_to_process = expanded_files[:MAX_IMAGES_FROM_ARCHIVES]
 
             import_count = 0
             skip_count = 0
-            fail_msgs: list[str] = []
+            fail_count = 0
+            results: list[dict[str, str]] = []
 
             import hashlib
             import time
 
-            for uploaded_file in files_to_process:
+            total = len(files_to_process)
+            for idx, uploaded_file in enumerate(files_to_process, start=1):
                 file_name = getattr(uploaded_file, "name", "设计图")
                 raw_bytes = uploaded_file.read()
 
                 # 单图大小检查（放宽到 30MB，但仍做安全限制）
                 if len(raw_bytes) > 30 * 1024 * 1024:
-                    fail_msgs.append(f"{file_name}：单个文件超过 30MB，已跳过")
+                    msg = f"{file_name}：单个文件超过 30MB，已跳过"
+                    results.append({"name": file_name, "status": "failed", "message": msg})
+                    fail_count += 1
                     continue
 
                 file_hash = hashlib.sha256(raw_bytes).hexdigest()
@@ -2217,26 +2241,32 @@ def _render_module_memory(T: dict, defaults: dict):
                         # 无 PyMuPDF 时，直接把 PDF 字节发给 Gemini
                         pages_bytes = [(raw_bytes, "application/pdf")]
                     except Exception as ex:
-                        fail_msgs.append(f"{file_name}：PDF 解析失败 - {ex}")
+                        msg = f"{file_name}：PDF 解析失败 - {ex}"
+                        results.append({"name": file_name, "status": "failed", "message": msg})
+                        fail_count += 1
                         continue
                 else:
                     pages_bytes = [(raw_bytes, mime_type)]
 
                 page_descriptions: list[str] = []
-                for idx, (pb, pm) in enumerate(pages_bytes):
+                for p_idx, (pb, pm) in enumerate(pages_bytes):
                     with st.spinner(
                         (_get_text(T, "memory_tab.design_mockup_parsing") or "正在用 Gemini Vision 解析设计图…")
-                        + (f"（第 {idx + 1} 页）" if len(pages_bytes) > 1 else "")
+                        + f"（{idx}/{total}，第 {p_idx + 1} 页）"
                     ):
                         desc, err = _parse_design_image_with_gemini(pb, pm, gemini_key)
                     if err:
-                        fail_msgs.append(f"{file_name} 第{idx+1}页：{err}")
+                        msg = f"{file_name} 第{p_idx+1}页：{err}"
+                        results.append({"name": file_name, "status": "failed", "message": msg})
+                        fail_count += 1
+                        page_descriptions = []
+                        break
                     else:
                         if len(pages_bytes) > 1:
-                            page_descriptions.append(f"### 第 {idx+1} 页\n\n{desc}")
+                            page_descriptions.append(f"### 第 {p_idx+1} 页\n\n{desc}")
                         else:
                             page_descriptions.append(desc)
-                    if idx < len(pages_bytes) - 1:
+                    if p_idx < len(pages_bytes) - 1:
                         time.sleep(1)
 
                 if not page_descriptions:
@@ -2254,6 +2284,11 @@ def _render_module_memory(T: dict, defaults: dict):
 
                 if status == "skipped":
                     skip_count += 1
+                    latest_dt = _find_latest_design_import_time(file_hash[:16], project_id=project_id)
+                    msg = "内容未变更，已跳过"
+                    if latest_dt:
+                        msg += f"（已于 {latest_dt} 导入）"
+                    results.append({"name": file_name, "status": "skipped", "message": msg})
                 else:
                     import_count += 1
                     try:
@@ -2264,23 +2299,101 @@ def _render_module_memory(T: dict, defaults: dict):
                         pass
                     with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
                         _generate_entry_summary(rowid, full_description, gemini_key)
+                    results.append({"name": file_name, "status": "success", "message": "已解析并写入项目记忆"})
+
+            st.session_state["design_import_results"] = results
 
             if import_count:
                 st.success(
                     (_get_text(T, "memory_tab.design_mockup_success") or "设计图已解析导入，下次生成用例时 Agent 将参考。")
-                    + f"（{import_count} 个）"
+                    + f"（成功 {import_count} 个，跳过 {skip_count} 个，失败 {fail_count} 个）"
                 )
-            if skip_count:
-                st.info(
-                    (_get_text(T, "memory_tab.design_mockup_skipped") or "设计图未变更，已跳过")
-                    + f"（{skip_count} 个）"
-                )
-            for msg in fail_msgs:
-                st.error(msg)
-            if import_count or skip_count:
+            elif skip_count or fail_count:
+                st.info(f"本次未有新设计图写入（跳过 {skip_count} 个，失败 {fail_count} 个）。")
+            if import_count or skip_count or fail_count:
                 st.rerun()
 
+    # 本次导入结果视图
+    results = st.session_state.get("design_import_results") or []
+    if results:
+        st.markdown("**本次导入结果**")
+        for r in results:
+            status = r.get("status", "")
+            if status == "success":
+                prefix = "✅"
+            elif status == "skipped":
+                prefix = "ℹ️"
+            else:
+                prefix = "❌"
+            st.caption(f"{prefix} {r.get('name', '')} — {r.get('message', '')}")
+
     st.divider()
+
+    # 设计图历史列表
+    st.markdown("**设计图历史**")
+    try:
+        from memory_store import list_for_browse, DESIGN_MOCKUP_SOURCE_TYPE
+    except ImportError:
+        st.caption("当前运行环境未启用项目记忆存储，无法展示设计图历史。")
+    else:
+        design_entries = list_for_browse(
+            source_type_filter=DESIGN_MOCKUP_SOURCE_TYPE,
+            limit=50,
+            project_id=project_id,
+        )
+        if not design_entries:
+            st.caption("当前项目尚未导入任何设计图。")
+        else:
+            for e in design_entries:
+                created = e.get("created_at", "")
+                title = (e.get("title") or "").strip() or "设计图"
+                status = (e.get("agent_summary_status") or "pending").lower()
+                if status == "success":
+                    tag = "有摘要✓"
+                elif status == "failed":
+                    tag = "摘要失败✗"
+                else:
+                    tag = "摘要待生成"
+                label = f"[{created}] {title} · [{tag}]"
+                with st.expander(label, expanded=False):
+                    content = (e.get("content") or "").strip()
+                    st.caption("摘要")
+                    if status == "success":
+                        st.markdown(e.get("agent_summary", "") or "_（暂无）_")
+                    elif status == "failed":
+                        st.caption("摘要生成失败")
+                        if st.button(
+                            _get_text(T, "memory_tab.agent_summary_retry_btn") or "重试摘要",
+                            key=f"retry_design_summary_{e.get('id')}",
+                        ):
+                            ok, err = _generate_entry_summary(
+                                e["id"],
+                                content,
+                                defaults.get("gemini_key", ""),
+                            )
+                            if ok:
+                                st.rerun()
+                            else:
+                                st.error(f"摘要生成失败：{err}")
+                    else:
+                        st.caption("摘要待生成")
+                        if st.button(
+                            _get_text(T, "memory_tab.agent_summary_generate_btn") or "生成摘要",
+                            key=f"gen_design_summary_{e.get('id')}",
+                        ):
+                            ok, err = _generate_entry_summary(
+                                e["id"],
+                                content,
+                                defaults.get("gemini_key", ""),
+                            )
+                            if ok:
+                                st.rerun()
+                            else:
+                                st.error(f"摘要生成失败：{err}")
+
+                    st.divider()
+                    st.caption("设计图结构化描述（前 2000 字）")
+                    st.markdown(content[:2000] + ("…" if len(content) > 2000 else ""))
     with st.expander(_get_text(T, "memory_tab.memory_summary_section") or "项目记忆摘要（高级）", expanded=False):
         mem = load_project_memory(project_id=project_id)
         new_mem = st.text_area(
