@@ -2094,9 +2094,19 @@ def _render_module_memory(T: dict, defaults: dict):
             st.error(_get_text(T, "memory_tab.design_mockup_key_missing") or "请先在设置中配置 Gemini API Key")
         else:
             cached_design = st.session_state.get(design_cache_key) or []
-            files_source = list(design_files) if design_files else [
-                _MemoryUpload(item["name"], item["bytes"]) for item in cached_design
-            ]
+            # 始终优先使用缓存中的原始字节，避免二次 read 导致游标在 EOF 位置
+            files_source: list[_MemoryUpload] = []
+            if cached_design:
+                files_source = [_MemoryUpload(item["name"], item["bytes"]) for item in cached_design]
+            elif design_files:
+                # 理论上上方缓存已存在；此分支仅作为兜底
+                for f in (design_files or []):
+                    try:
+                        name = getattr(f, "name", "") or "设计图"
+                        data = f.read()
+                        files_source.append(_MemoryUpload(name, data or b""))
+                    except Exception:
+                        continue
             if not files_source:
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
