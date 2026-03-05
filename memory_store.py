@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import threading
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -113,18 +114,25 @@ class SqliteBackend:
     """sqlite3 可用时的后端实现。"""
 
     def __init__(self) -> None:
-        self._conn: Any | None = None
+        # Streamlit Cloud 可能在多线程下复用同一 backend 实例：
+        # sqlite 连接必须与创建它的线程一致，故按线程隔离连接。
+        self._local = threading.local()
         self._tables_ready = False
+        self._init_lock = threading.Lock()
 
     def _get_conn(self):
-        if self._conn is None:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            self._conn = sqlite3.connect(MEMORY_DB_PATH)  # type: ignore[call-arg]
-            self._conn.row_factory = sqlite3.Row  # type: ignore[attr-defined]
+            conn = sqlite3.connect(MEMORY_DB_PATH)  # type: ignore[call-arg]
+            conn.row_factory = sqlite3.Row  # type: ignore[attr-defined]
+            self._local.conn = conn
         if not self._tables_ready:
-            self._ensure_tables(self._conn)
-            self._tables_ready = True
-        return self._conn
+            with self._init_lock:
+                if not self._tables_ready:
+                    self._ensure_tables(conn)
+                    self._tables_ready = True
+        return conn
 
     def _ensure_tables(self, conn) -> None:
         conn.execute(
