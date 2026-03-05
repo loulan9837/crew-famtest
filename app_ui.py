@@ -2060,7 +2060,18 @@ def _render_module_memory(T: dict, defaults: dict):
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
             or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤400MB）",
         )
-        design_files = design_upload_result.get("files") if design_upload_result else None
+        if design_upload_result:
+            # 兼容组件返回结构：
+            # - 单文件: {"file": UploadedFile, ...}
+            # - 多文件: {"files": [UploadedFile, ...], ...}
+            if isinstance(design_upload_result.get("files"), list):
+                design_files = design_upload_result.get("files")
+            elif design_upload_result.get("file"):
+                design_files = [design_upload_result.get("file")]
+            else:
+                design_files = None
+        else:
+            design_files = None
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
