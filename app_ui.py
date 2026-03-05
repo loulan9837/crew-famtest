@@ -354,18 +354,31 @@ def _load_models() -> tuple[list[tuple[str, str]], str]:
 
 
 def _load_version() -> dict:
-    """从 config/version.yaml 读取版本号，用于验证线上代码已成功更新。"""
+    """从 config/version.yaml 读取版本号，用于验证线上代码已成功更新。
+
+    版本号约定格式：YYYY-MM-DD-NNN（如 2026-03-03-001），但这里仅做软校验：
+    - 读取失败时返回空，不影响应用启动；
+    - 若格式不符，仅打印告警日志，方便排查。
+    """
     try:
+        import re
         import yaml
-        if os.path.isfile(VERSION_PATH):
-            with open(VERSION_PATH, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                v = data.get("version", "")
-                b = data.get("build_time", "")
-                return {"version": str(v) if v else "", "build_time": str(b) if b else ""}
+
+        if not os.path.isfile(VERSION_PATH):
+            return {"version": "", "build_time": ""}
+        with open(VERSION_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        ver = str(data.get("version", "") or "").strip()
+        build_time = str(data.get("build_time", "") or "").strip()
+
+        if ver:
+            pattern = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{3}$")
+            if not pattern.match(ver):
+                # 软告警：仅打印日志，不影响正常展示
+                print(f"[WARN] version.yaml 中的版本号格式不符合 YYYY-MM-DD-NNN 约定：{ver}")
+        return {"version": ver, "build_time": build_time}
     except Exception:
-        pass
-    return {"version": "", "build_time": ""}
+        return {"version": "", "build_time": ""}
 
 
 def _load_workbench_apps(T: dict) -> list[dict]:
