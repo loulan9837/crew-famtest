@@ -22,6 +22,7 @@ from crew_test import (
     _export_to_excel,
     _parse_markdown_tables,
     _resolve_gemini_model,
+    _sanitize_cell_for_excel,
     chat_with_document_agent,
     export_tables_to_excel_bytes,
     generate_incremental_cases,
@@ -445,6 +446,118 @@ def _update_cases_state_from_md(prd_text: str, cases_md: str) -> None:
         excel_bytes = export_tables_to_excel_bytes(tables)
         if excel_bytes:
             st.session_state["current_cases_excel_bytes"] = excel_bytes
+
+
+def _normalize_full_regression_lines(text: str) -> list[str]:
+    """将全回归用例文本按行切分并规范化，去掉空行与首尾空白。"""
+    lines: list[str] = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if s:
+            lines.append(s)
+    return lines
+
+
+def _merge_full_regression(existing: str, new: str) -> tuple[str, int]:
+    """全回归用例行级精确去重 + 有序合并。
+
+    返回 (merged_text, added_rows)，其中 added_rows 为本次新增的非重复行数。
+    """
+    old_lines = _normalize_full_regression_lines(existing)
+    new_lines = _normalize_full_regression_lines(new)
+
+    merged_lines: list[str] = []
+    seen: set[str] = set()
+
+    for line in old_lines:
+        if line not in seen:
+            merged_lines.append(line)
+            seen.add(line)
+
+    added = 0
+    for line in new_lines:
+        if line not in seen:
+            merged_lines.append(line)
+            seen.add(line)
+            added += 1
+
+    return "\n".join(merged_lines), added
+
+
+def _handle_full_regression_import(
+    T: dict,
+    content_new: str,
+    rows: int,
+    file_display_name: str,
+    project_id: str,
+    defaults: dict,
+) -> None:
+    """写入全回归用例存档记录，并更新聚合视图（行级精确去重 + 有序合并）。"""
+    from datetime import datetime
+    import hashlib
+
+    from context_cache_service import mark_context_cache_dirty  # type: ignore[import]
+
+    if not content_new.strip():
+        st.warning(_get_text(T, "memory_tab.file_empty") or "文件内容为空")
+        return
+
+    # 1. 写入存档记录：full_regression:{import_id}
+    now_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    hash_prefix = hashlib.sha256(content_new.encode("utf-8")).hexdigest()[:8]
+    import_id = f"{now_id}_{hash_prefix}"
+    archive_source_id = f"full_regression:{import_id}"
+
+    add_entry_with_dedup(
+        TEST_CASES_SOURCE_TYPE,
+        content_new,
+        source_id=archive_source_id,
+        title=f"全回归测试用例 - {file_display_name}",
+        summary=content_new[:500],
+        project_id=project_id,
+    )
+
+    # 2. 读取当前聚合视图并合并
+    existing = get_entry_content(
+        TEST_CASES_SOURCE_TYPE,
+        "full_regression",
+        project_id=project_id,
+    ) or ""
+    merged_content, added_rows = _merge_full_regression(existing, content_new)
+    if not merged_content.strip():
+        st.warning("合并后的全回归用例内容为空")
+        return
+
+    # 3. 写回聚合视图：source_id = full_regression
+    rowid, status = add_entry_with_dedup(
+        TEST_CASES_SOURCE_TYPE,
+        merged_content,
+        source_id="full_regression",
+        title="全回归测试用例（聚合）",
+        summary=merged_content[:500],
+        project_id=project_id,
+    )
+    if status == "skipped":
+        st.info("导入内容与现有聚合结果一致，未产生新增用例。")
+        return
+
+    # 4. 标记上下文缓存与知识库为脏，并生成 Librarian 摘要
+    try:
+        mark_context_cache_dirty(f"test_cases_{status}")
+    except Exception:
+        pass
+
+    try:
+        with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
+            _generate_entry_summary(rowid, merged_content, defaults.get("gemini_key", ""))
+    except Exception:
+        # 摘要失败不影响主流程
+        pass
+
+    if added_rows > 0:
+        st.success(f"已导入 {rows} 行，其中新增 {added_rows} 行，全回归聚合用例已更新。")
+    else:
+        st.success(f"已导入 {rows} 行，全回归聚合用例已更新。")
 
 
 def _render_incremental_section(T: dict, defaults: dict) -> None:
@@ -1839,13 +1952,16 @@ def _render_module_memory(T: dict, defaults: dict):
         # 始终优先使用缓存中的原始字节，避免二次 read 导致游标在 EOF 位置
         cached_tc = st.session_state.get(tc_cache_key)
         file_for_import = None
+        file_display_name = "测试用例上传"
         if cached_tc:
+            file_display_name = cached_tc["name"]
             file_for_import = _MemoryUpload(cached_tc["name"], cached_tc["bytes"])
         elif test_cases_file:
             # 理论上上方缓存已存在；此分支仅作为兜底
             try:
                 name = getattr(test_cases_file, "name", "") or "测试用例上传"
                 data = test_cases_file.read()
+                file_display_name = name
                 file_for_import = _MemoryUpload(name, data or b"")
             except Exception:
                 file_for_import = None
@@ -1857,54 +1973,75 @@ def _render_module_memory(T: dict, defaults: dict):
                     if not content.strip():
                         st.warning(_get_text(T, "memory_tab.file_empty") or "文件内容为空")
                     else:
-                        rowid, status = add_entry_with_dedup(
-                            TEST_CASES_SOURCE_TYPE,
-                            content,
-                            source_id="full_regression",
-                            title="全回归测试用例",
-                            summary=content[:500],
+                        # 写入存档记录并更新聚合视图
+                        _handle_full_regression_import(
+                            T=T,
+                            content_new=content,
+                            rows=rows,
+                            file_display_name=file_display_name,
                             project_id=project_id,
+                            defaults=defaults,
                         )
-                        if status == "skipped":
-                            st.info(_get_text(T, "memory_tab.history_item_skipped") or "文件未变更，已跳过")
-                        else:
-                            try:
-                                from context_cache_service import mark_context_cache_dirty
-
-                                mark_context_cache_dirty(f"test_cases_{status}")
-                            except ImportError:
-                                pass
-                            with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
-                                _generate_entry_summary(rowid, content, defaults.get("gemini_key", ""))
-                            st.success(f"已导入 {rows} 行（{len(content)} 字），Agent 将参考既有用例。")
-                        st.rerun()
+                    st.rerun()
                 except Exception as ex:
                     st.error(f"{_get_text(T, 'memory_tab.parse_fail') or '解析失败'}: {ex}")
         elif test_cases_paste and test_cases_paste.strip():
             content = test_cases_paste.strip()
-            rowid, status = add_entry_with_dedup(
-                TEST_CASES_SOURCE_TYPE,
-                content,
-                source_id="full_regression",
-                title="全回归测试用例",
-                summary=content[:500],
-                project_id=project_id,
-            )
-            if status == "skipped":
-                st.info(_get_text(T, "memory_tab.history_item_skipped") or "文件未变更，已跳过")
-            else:
-                try:
-                    from context_cache_service import mark_context_cache_dirty
-
-                    mark_context_cache_dirty(f"test_cases_{status}")
-                except ImportError:
-                    pass
-                with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
-                    _generate_entry_summary(rowid, content, defaults.get("gemini_key", ""))
-                st.success(f"已导入（{len(content)} 字），Agent 将参考既有用例。")
+            with st.spinner(_get_text(T, "memory_tab.import_spinner_file") or "解析文件中…"):
+                # 纯文本模式视为已规范化的按行用例内容
+                _handle_full_regression_import(
+                    T=T,
+                    content_new=content,
+                    rows=len([l for l in content.splitlines() if l.strip()]),
+                    file_display_name="粘贴内容",
+                    project_id=project_id,
+                    defaults=defaults,
+                )
             st.rerun()
         else:
             st.error(_get_text(T, "memory_tab.import_required") or "请上传文件或粘贴内容")
+
+    # 导出全回归用例（聚合视图）
+    if st.button("导出全回归用例（聚合）", key="mem_export_full_regression"):
+        agg = _full_regression or get_entry_content(
+            TEST_CASES_SOURCE_TYPE,
+            "full_regression",
+            project_id=project_id,
+        )
+        if not agg or not agg.strip():
+            st.warning("暂无聚合后的全回归用例可导出")
+        else:
+            try:
+                from io import BytesIO
+                import openpyxl
+            except ImportError:
+                st.download_button(
+                    "📥 下载全回归用例（聚合·文本）",
+                    data=agg,
+                    file_name="全回归用例_聚合.txt",
+                    mime="text/plain",
+                    key="dl_full_regression_txt",
+                )
+            else:
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "全回归用例"
+                lines = [line.strip() for line in (agg or "").splitlines() if line.strip()]
+                for r_idx, line in enumerate(lines, start=1):
+                    parts = [p.strip() for p in line.split("|")]
+                    cells = [p for p in parts if p] or [line]
+                    for c_idx, val in enumerate(cells, start=1):
+                        safe_val = _sanitize_cell_for_excel(val)
+                        ws.cell(row=r_idx, column=c_idx, value=safe_val)
+                buf = BytesIO()
+                wb.save(buf)
+                st.download_button(
+                    "📥 下载全回归用例（聚合·Excel）",
+                    data=buf.getvalue(),
+                    file_name="全回归用例_聚合.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_full_regression_xlsx",
+                )
 
     # === 导入设计图 ===
     st.markdown("**" + (_get_text(T, "memory_tab.design_mockup_section") or "导入设计图") + "**")

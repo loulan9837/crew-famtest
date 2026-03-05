@@ -1187,16 +1187,28 @@ def get_project_context_for_agent(include_store: bool = True) -> str:
     except ImportError:
         pass
     try:
-        from memory_store import get_recent_for_agent
+        from memory_store import get_recent_for_agent, get_entry_content, TEST_CASES_SOURCE_TYPE
 
+        # 仅将需求文档 / 设计图等「需求类」记忆注入上下文，不在此处枚举所有 test_cases 存档记录
         store_ctx = get_recent_for_agent(
             limit=10,
             demand_only=True,
-            include_test_cases=True,
+            include_test_cases=False,
             project_id=project_id,
         )
         if store_ctx:
             md_ctx = (md_ctx + "\n\n【近期需求与产出记录】\n" + store_ctx).strip()
+
+        # 全回归用例：只从聚合视图 full_regression 读取，避免遍历所有 full_regression:* 存档记录
+        full_reg = get_entry_content(
+            TEST_CASES_SOURCE_TYPE,
+            "full_regression",
+            project_id=project_id,
+        )
+        if full_reg and full_reg.strip():
+            md_ctx = (
+                md_ctx + "\n\n【全回归测试用例（聚合）】\n" + full_reg.strip()
+            ).strip()
     except ImportError:
         pass
     return md_ctx
