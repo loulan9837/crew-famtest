@@ -2329,71 +2329,71 @@ def _render_module_memory(T: dict, defaults: dict):
 
     st.divider()
 
-    # 设计图历史列表
-    st.markdown("**设计图历史**")
-    try:
-        from memory_store import list_for_browse, DESIGN_MOCKUP_SOURCE_TYPE
-    except ImportError:
-        st.caption("当前运行环境未启用项目记忆存储，无法展示设计图历史。")
-    else:
-        design_entries = list_for_browse(
-            source_type_filter=DESIGN_MOCKUP_SOURCE_TYPE,
-            limit=50,
-            project_id=project_id,
-        )
-        if not design_entries:
-            st.caption("当前项目尚未导入任何设计图。")
+    # 设计图历史列表（整个时间轴可整体展开/收起）
+    with st.expander("设计图历史", expanded=False):
+        try:
+            from memory_store import list_for_browse, DESIGN_MOCKUP_SOURCE_TYPE
+        except ImportError:
+            st.caption("当前运行环境未启用项目记忆存储，无法展示设计图历史。")
         else:
-            for e in design_entries:
-                created = e.get("created_at", "")
-                title = (e.get("title") or "").strip() or "设计图"
-                status = (e.get("agent_summary_status") or "pending").lower()
-                if status == "success":
-                    tag = "有摘要✓"
-                elif status == "failed":
-                    tag = "摘要失败✗"
-                else:
-                    tag = "摘要待生成"
-                label = f"[{created}] {title} · [{tag}]"
-                with st.expander(label, expanded=False):
-                    content = (e.get("content") or "").strip()
-                    st.caption("摘要")
+            design_entries = list_for_browse(
+                source_type_filter=DESIGN_MOCKUP_SOURCE_TYPE,
+                limit=50,
+                project_id=project_id,
+            )
+            if not design_entries:
+                st.caption("当前项目尚未导入任何设计图。")
+            else:
+                for e in design_entries:
+                    created = e.get("created_at", "")
+                    title = (e.get("title") or "").strip() or "设计图"
+                    status = (e.get("agent_summary_status") or "pending").lower()
                     if status == "success":
-                        st.markdown(e.get("agent_summary", "") or "_（暂无）_")
+                        tag = "有摘要✓"
                     elif status == "failed":
-                        st.caption("摘要生成失败")
-                        if st.button(
-                            _get_text(T, "memory_tab.agent_summary_retry_btn") or "重试摘要",
-                            key=f"retry_design_summary_{e.get('id')}",
-                        ):
-                            ok, err = _generate_entry_summary(
-                                e["id"],
-                                content,
-                                defaults.get("gemini_key", ""),
-                            )
-                            if ok:
-                                st.rerun()
-                            else:
-                                st.error(f"摘要生成失败：{err}")
+                        tag = "摘要失败✗"
                     else:
-                        st.caption("摘要待生成")
-                        if st.button(
-                            _get_text(T, "memory_tab.agent_summary_generate_btn") or "生成摘要",
-                            key=f"gen_design_summary_{e.get('id')}",
-                        ):
-                            ok, err = _generate_entry_summary(
-                                e["id"],
-                                content,
-                                defaults.get("gemini_key", ""),
-                            )
-                            if ok:
-                                st.rerun()
-                            else:
-                                st.error(f"摘要生成失败：{err}")
+                        tag = "摘要待生成"
+                    label = f"[{created}] {title} · [{tag}]"
+                    with st.expander(label, expanded=False):
+                        content = (e.get("content") or "").strip()
+                        st.caption("摘要")
+                        if status == "success":
+                            st.markdown(e.get("agent_summary", "") or "_（暂无）_")
+                        elif status == "failed":
+                            st.caption("摘要生成失败")
+                            if st.button(
+                                _get_text(T, "memory_tab.agent_summary_retry_btn") or "重试摘要",
+                                key=f"retry_design_summary_{e.get('id')}",
+                            ):
+                                ok, err = _generate_entry_summary(
+                                    e["id"],
+                                    content,
+                                    defaults.get("gemini_key", ""),
+                                )
+                                if ok:
+                                    st.rerun()
+                                else:
+                                    st.error(f"摘要生成失败：{err}")
+                        else:
+                            st.caption("摘要待生成")
+                            if st.button(
+                                _get_text(T, "memory_tab.agent_summary_generate_btn") or "生成摘要",
+                                key=f"gen_design_summary_{e.get('id')}",
+                            ):
+                                ok, err = _generate_entry_summary(
+                                    e["id"],
+                                    content,
+                                    defaults.get("gemini_key", ""),
+                                )
+                                if ok:
+                                    st.rerun()
+                                else:
+                                    st.error(f"摘要生成失败：{err}")
 
-                    st.divider()
-                    st.caption("设计图结构化描述（前 2000 字）")
-                    st.markdown(content[:2000] + ("…" if len(content) > 2000 else ""))
+                        st.divider()
+                        st.caption("设计图结构化描述（前 2000 字）")
+                        st.markdown(content[:2000] + ("…" if len(content) > 2000 else ""))
     with st.expander(_get_text(T, "memory_tab.memory_summary_section") or "项目记忆摘要（高级）", expanded=False):
         mem = load_project_memory(project_id=project_id)
         new_mem = st.text_area(
