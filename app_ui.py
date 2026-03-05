@@ -1917,17 +1917,18 @@ def _render_module_memory(T: dict, defaults: dict):
         from app_ui_components import render_file_uploader
 
         design_upload_result = render_file_uploader(
-            accepted_types=["png", "jpg", "jpeg", "pdf"],
+            accepted_types=["png", "jpg", "jpeg", "pdf", "zip"],
+            max_size_mb=400,
             key="design_mockup_upload",
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF，最多 5 个，单文件 ≤10MB）",
+            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤400MB）",
         )
         design_files = design_upload_result.get("files") if design_upload_result else None
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF，最多 5 个，单文件 ≤10MB）",
-            type=["png", "jpg", "jpeg", "pdf"],
+            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤400MB）",
+            type=["png", "jpg", "jpeg", "pdf", "zip"],
             key="design_mockup_upload",
             accept_multiple_files=True,
             label_visibility="collapsed",
@@ -1963,9 +1964,50 @@ def _render_module_memory(T: dict, defaults: dict):
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
 
-            files_to_process = files_source[:5]
-            if len(files_to_process) < len(files_source):
-                st.warning("已超过 5 个文件限制，只处理前 5 个。")
+            # 展开 zip：用户可以上传一个大型 zip 包含多张 PNG/JPG
+            expanded_files: list[_MemoryUpload] = []
+            from io import BytesIO
+            import zipfile
+
+            # 单次导入的设计图数量上限：放宽到 3000 张，兼顾大批量导入与性能
+            MAX_IMAGES_FROM_ARCHIVES = 3000
+            image_count = 0
+
+            for f in files_source:
+                name = getattr(f, "name", "") or "设计图"
+                raw = f.read()
+                ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+                if ext == "zip":
+                    try:
+                        zf = zipfile.ZipFile(BytesIO(raw))
+                    except Exception as ex:
+                        st.error(f"{name}：ZIP 解析失败 - {ex}")
+                        continue
+                    for zi in zf.infolist():
+                        if zi.is_dir():
+                            continue
+                        inner_name = zi.filename.rsplit("/", 1)[-1]
+                        inner_ext = inner_name.lower().rsplit(".", 1)[-1] if "." in inner_name else ""
+                        if inner_ext not in ("png", "jpg", "jpeg"):
+                            continue
+                        if image_count >= MAX_IMAGES_FROM_ARCHIVES:
+                            break
+                        try:
+                            data = zf.read(zi)
+                        except Exception:
+                            continue
+                        expanded_files.append(_MemoryUpload(inner_name, data))
+                        image_count += 1
+                    zf.close()
+                else:
+                    expanded_files.append(f)
+
+            if not expanded_files:
+                st.error("ZIP 中未找到可用的 PNG/JPG 设计图")
+                return
+
+            # 实际处理的文件列表：限制单次最多 500 个，避免极端大包拖垮前端
+            files_to_process = expanded_files[:MAX_IMAGES_FROM_ARCHIVES]
 
             import_count = 0
             skip_count = 0
@@ -1978,9 +2020,9 @@ def _render_module_memory(T: dict, defaults: dict):
                 file_name = getattr(uploaded_file, "name", "设计图")
                 raw_bytes = uploaded_file.read()
 
-                # 文件大小检查（10MB）
-                if len(raw_bytes) > 10 * 1024 * 1024:
-                    fail_msgs.append(f"{file_name}：文件超过 10MB，已跳过")
+                # 单图大小检查（放宽到 30MB，但仍做安全限制）
+                if len(raw_bytes) > 30 * 1024 * 1024:
+                    fail_msgs.append(f"{file_name}：单个文件超过 30MB，已跳过")
                     continue
 
                 file_hash = hashlib.sha256(raw_bytes).hexdigest()
@@ -1997,8 +2039,6 @@ def _render_module_memory(T: dict, defaults: dict):
                 pages_bytes: list[tuple[bytes, str]] = []
                 if ext == "pdf":
                     try:
-                        from io import BytesIO
-
                         import fitz  # type: ignore[import]  # PyMuPDF 可选
 
                         doc = fitz.open(stream=raw_bytes, filetype="pdf")
