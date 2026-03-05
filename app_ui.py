@@ -1836,10 +1836,19 @@ def _render_module_memory(T: dict, defaults: dict):
         label_visibility="collapsed",
     )
     if st.button(_get_text(T, "memory_tab.test_cases_import_btn") or "导入测试用例", key="mem_import_test_cases"):
+        # 始终优先使用缓存中的原始字节，避免二次 read 导致游标在 EOF 位置
         cached_tc = st.session_state.get(tc_cache_key)
-        file_for_import = test_cases_file
-        if not file_for_import and cached_tc:
+        file_for_import = None
+        if cached_tc:
             file_for_import = _MemoryUpload(cached_tc["name"], cached_tc["bytes"])
+        elif test_cases_file:
+            # 理论上上方缓存已存在；此分支仅作为兜底
+            try:
+                name = getattr(test_cases_file, "name", "") or "测试用例上传"
+                data = test_cases_file.read()
+                file_for_import = _MemoryUpload(name, data or b"")
+            except Exception:
+                file_for_import = None
 
         if file_for_import:
             with st.spinner(_get_text(T, "memory_tab.import_spinner_file") or "解析文件中…"):
