@@ -16,15 +16,41 @@ PROJECT_MEMORY_PATH = os.path.join(CONFIG_DIR, "project_memory.md")
 MAX_INPUT_CHARS = 45000  # 控制 LLM 输入长度
 KNOWLEDGE_DAYS_STALE = 7
 
+DEFAULT_PROJECT_ID = "FAMBASE"
 
-def _get_raw_content_for_knowledge() -> str:
+
+def _normalize_project_id(project_id: str | None) -> str:
+    pid = (project_id or DEFAULT_PROJECT_ID).upper()
+    if pid not in ("FAMBASE", "RM11"):
+        return DEFAULT_PROJECT_ID
+    return pid
+
+
+def _get_project_memory_path(project_id: str | None = None) -> str:
+    pid = _normalize_project_id(project_id)
+    if pid == "RM11":
+        return os.path.join(CONFIG_DIR, "project_memory_rm11.md")
+    return PROJECT_MEMORY_PATH
+
+
+def _get_knowledge_paths(project_id: str | None = None) -> tuple[str, str]:
+    pid = _normalize_project_id(project_id)
+    if pid == "RM11":
+        return (
+            os.path.join(CONFIG_DIR, "agent_knowledge_rm11.md"),
+            os.path.join(CONFIG_DIR, "agent_knowledge_rm11_meta.json"),
+        )
+    return AGENT_KNOWLEDGE_PATH, AGENT_KNOWLEDGE_META_PATH
+
+
+def _get_raw_content_for_knowledge(project_id: str | None = None) -> str:
     """从 memory_entries 收集需求、全回归、run_summary，按时间排序，截断至 max_chars。"""
     try:
         from memory_store import list_for_browse
     except ImportError:
         return ""
 
-    entries = list_for_browse(source_type_filter="", limit=80)
+    entries = list_for_browse(source_type_filter="", limit=80, project_id=_normalize_project_id(project_id))
     if not entries:
         return ""
 
@@ -46,43 +72,45 @@ def _get_raw_content_for_knowledge() -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def _load_project_memory() -> str:
-    """读取 project_memory.md。"""
-    if not os.path.isfile(PROJECT_MEMORY_PATH):
+def _load_project_memory(project_id: str | None = None) -> str:
+    """读取当前项目的 project_memory 文件内容。"""
+    path = _get_project_memory_path(project_id)
+    if not os.path.isfile(path):
         return ""
     try:
-        with open(PROJECT_MEMORY_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return ""
 
 
-def _get_last_updated() -> str | None:
+def _get_last_updated(project_id: str | None = None) -> str | None:
     """返回知识库最后更新时间，格式 YYYY-MM-DD HH:MM。不存在则 None。"""
-    if os.path.isfile(AGENT_KNOWLEDGE_META_PATH):
+    knowledge_path, meta_path = _get_knowledge_paths(project_id)
+    if os.path.isfile(meta_path):
         try:
-            with open(AGENT_KNOWLEDGE_META_PATH, "r", encoding="utf-8") as f:
+            with open(meta_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 return data.get("last_updated")
         except Exception:
             pass
-    if os.path.isfile(AGENT_KNOWLEDGE_PATH):
+    if os.path.isfile(knowledge_path):
         try:
-            mtime = os.path.getmtime(AGENT_KNOWLEDGE_PATH)
+            mtime = os.path.getmtime(knowledge_path)
             return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         except Exception:
             pass
     return None
 
 
-def get_last_updated() -> str | None:
+def get_last_updated(project_id: str | None = None) -> str | None:
     """返回知识库最后更新时间，格式 YYYY-MM-DD HH:MM。不存在则 None。供 UI 展示。"""
-    return _get_last_updated()
+    return _get_last_updated(project_id)
 
 
-def is_knowledge_stale() -> bool:
+def is_knowledge_stale(project_id: str | None = None) -> bool:
     """知识库是否已过期（≥7 天未更新）。"""
-    last = _get_last_updated()
+    last = _get_last_updated(project_id)
     if not last:
         return True
     try:
@@ -105,22 +133,26 @@ def build_agent_knowledge(
     if not key:
         return False, "请先配置 GEMINI_API_KEY"
 
-    raw_store = _get_raw_content_for_knowledge()
-    raw_project = _load_project_memory()
+    # 当前项目：若调用方未显式传入，可通过环境变量 APP_CURRENT_PROJECT 约定
+    project_id = _normalize_project_id(os.environ.get("APP_CURRENT_PROJECT"))
+
+    raw_store = _get_raw_content_for_knowledge(project_id)
+    raw_project = _load_project_memory(project_id)
     combined = (raw_project + "\n\n---\n\n【记忆库内容】\n\n" + raw_store).strip()
     if not combined or (not raw_store and not raw_project):
         # 空数据：写入最小模板
-        minimal = """# Agent 知识库（Fambase）
+        minimal = """# Agent 知识库
 
 ## 一、产品域概览
 暂无导入数据。请先在「项目记忆」页导入需求文档与全回归用例后，点击「刷新知识库」。
 """
         try:
+            knowledge_path, meta_path = _get_knowledge_paths(project_id)
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(AGENT_KNOWLEDGE_PATH, "w", encoding="utf-8") as f:
+            with open(knowledge_path, "w", encoding="utf-8") as f:
                 f.write(minimal)
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            with open(AGENT_KNOWLEDGE_META_PATH, "w", encoding="utf-8") as f:
+            with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({"last_updated": now_str}, f, ensure_ascii=False, indent=2)
             return True, ""
         except Exception as e:
@@ -169,11 +201,12 @@ def build_agent_knowledge(
             if not result:
                 raise ValueError("LLM 返回为空")
 
+            knowledge_path, meta_path = _get_knowledge_paths(project_id)
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(AGENT_KNOWLEDGE_PATH, "w", encoding="utf-8") as f:
+            with open(knowledge_path, "w", encoding="utf-8") as f:
                 f.write(result)
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            with open(AGENT_KNOWLEDGE_META_PATH, "w", encoding="utf-8") as f:
+            with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({"last_updated": now_str}, f, ensure_ascii=False, indent=2)
             return True, ""
         except Exception as e:
@@ -187,12 +220,13 @@ def build_agent_knowledge(
     return False, "构建失败，请稍后重试"
 
 
-def load_agent_knowledge() -> str:
-    """读取 agent_knowledge.md 内容，不存在或为空则返回空字符串。"""
-    if not os.path.isfile(AGENT_KNOWLEDGE_PATH):
+def load_agent_knowledge(project_id: str | None = None) -> str:
+    """读取当前项目的 agent_knowledge 内容，不存在或为空则返回空字符串。"""
+    knowledge_path, _ = _get_knowledge_paths(project_id)
+    if not os.path.isfile(knowledge_path):
         return ""
     try:
-        with open(AGENT_KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
+        with open(knowledge_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return ""

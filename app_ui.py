@@ -108,6 +108,70 @@ MODULE_CHAT = "chat"
 MODULE_RISK_REPORT = "risk_report"
 MODULE_SETTINGS = "settings"
 
+PROJECT_FAMBASE = "FAMBASE"
+PROJECT_RM11 = "RM11"
+
+
+def _normalize_project_id(project_id: str | None) -> str:
+    pid = (project_id or PROJECT_FAMBASE).upper()
+    if pid not in (PROJECT_FAMBASE, PROJECT_RM11):
+        return PROJECT_FAMBASE
+    return pid
+
+
+def _get_current_project() -> str:
+    """获取当前项目 ID，并同步到环境变量，供后端逻辑使用。"""
+    pid = _normalize_project_id(st.session_state.get("current_project"))
+    st.session_state["current_project"] = pid
+    os.environ["APP_CURRENT_PROJECT"] = pid
+    return pid
+
+
+def _get_project_display_name(project_id: str) -> str:
+    pid = _normalize_project_id(project_id)
+    if pid == PROJECT_FAMBASE:
+        return "Fambase"
+    if pid == PROJECT_RM11:
+        return "RM11"
+    return pid
+
+
+def _has_unsaved_project_state() -> bool:
+    """粗粒度检测当前项目下是否存在未保存的用户输入，用于项目切换前确认。"""
+    s = st.session_state
+    if (s.get("run_paste_content") or "").strip():
+        return True
+    if s.get("run_upload_files_cache"):
+        return True
+    if (s.get("mem_demand_paste") or "").strip():
+        return True
+    if s.get("memory_test_cases_upload_cache"):
+        return True
+    if (s.get("test_cases_paste") or "").strip():
+        return True
+    if (s.get("chat_paste_doc") or "").strip():
+        return True
+    if (s.get("risk_report_paste") or "").strip():
+        return True
+    return False
+
+
+def _clear_project_related_state() -> None:
+    """清理与项目强相关的临时 UI 状态，避免多项目串数据。"""
+    prefixes = [
+        "run_",
+        "mem_",
+        "chat_",
+        "risk_report_",
+        "app_run_",
+        "app_memory_",
+        "app_doc_chat_",
+        "app_risk_report_",
+    ]
+    for key in list(st.session_state.keys()):
+        if any(key.startswith(p) for p in prefixes):
+            st.session_state.pop(key, None)
+
 class _MemoryUpload:
     """内存中的上传文件封装，兼容 parse_uploaded_files / parse_test_cases_file 接口。"""
 
@@ -662,6 +726,11 @@ def _render_main_app(T: dict, cookies=None):
     defaults = _load_defaults()
     workbench_apps = _load_workbench_apps(T)
 
+    # 初始化当前项目（双项目工作台）
+    if "current_project" not in st.session_state:
+        st.session_state["current_project"] = PROJECT_FAMBASE
+    current_project = _get_current_project()
+
     # 设计系统 CSS（见 docs/implementation-handoff-for-programming.md）
     st.markdown("""
     <style>
@@ -722,11 +791,63 @@ def _render_main_app(T: dict, cookies=None):
     </style>
     """, unsafe_allow_html=True)
 
-    # 侧栏导航
+    # 侧栏导航 + 项目切换器
     if "current_page" not in st.session_state:
         st.session_state["current_page"] = MODULE_RUN
 
     with st.sidebar:
+        # 项目切换器
+        st.markdown("**项目**")
+        col_f, col_r = st.columns(2)
+        with col_f:
+            if st.button(
+                "Fambase",
+                key="project_btn_fambase",
+                type="primary" if current_project == PROJECT_FAMBASE else "secondary",
+            ):
+                if current_project != PROJECT_FAMBASE:
+                    if _has_unsaved_project_state():
+                        st.session_state["project_switch_pending_target"] = PROJECT_FAMBASE
+                    else:
+                        _clear_project_related_state()
+                        st.session_state["current_project"] = PROJECT_FAMBASE
+                        _get_current_project()
+                    st.rerun()
+        with col_r:
+            if st.button(
+                "RM11",
+                key="project_btn_rm11",
+                type="primary" if current_project == PROJECT_RM11 else "secondary",
+            ):
+                if current_project != PROJECT_RM11:
+                    if _has_unsaved_project_state():
+                        st.session_state["project_switch_pending_target"] = PROJECT_RM11
+                    else:
+                        _clear_project_related_state()
+                        st.session_state["current_project"] = PROJECT_RM11
+                        _get_current_project()
+                    st.rerun()
+
+        pending_target = st.session_state.get("project_switch_pending_target")
+        if pending_target:
+            target_label = _get_project_display_name(pending_target)
+            st.warning(f"切换到「{target_label}」将清空当前未保存内容，是否继续？")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("确认切换", key="project_switch_confirm"):
+                    _clear_project_related_state()
+                    st.session_state["current_project"] = _normalize_project_id(pending_target)
+                    _get_current_project()
+                    st.session_state["project_switch_pending_target"] = ""
+                    st.rerun()
+            with c2:
+                if st.button("取消", key="project_switch_cancel"):
+                    st.session_state["project_switch_pending_target"] = ""
+                    st.rerun()
+
+        st.caption(f"当前项目：{_get_project_display_name(current_project)}")
+        st.divider()
+
         st.markdown(f"**{app_title}**")
         st.caption(_get_text(T, "app.slogan") or "需求即输入，用例即输出，AI 全程协同一键生成")
         st.divider()
@@ -777,6 +898,8 @@ def _render_main_app(T: dict, cookies=None):
         st.title(_get_text(T, "run_tab.run_btn") or "生成测试用例")
     else:
         st.title(_page_title)
+    # 页面级当前项目提示
+    st.caption(f"当前项目：{_get_project_display_name(_get_current_project())}")
 
     if current_page == MODULE_RUN:
         _render_module_run(T, defaults)
@@ -843,7 +966,11 @@ def _render_run_history(T: dict) -> None:
         st.caption("历史记录模块未就绪")
         return
 
-    records = list_run_records(keyword=keyword or "", limit=20)
+    records = list_run_records(
+        keyword=keyword or "",
+        limit=20,
+        project_id=_get_current_project(),
+    )
     if not records:
         st.info(_get_text(T, "run_tab.history_empty_state") or "暂无生成记录，上传或粘贴需求后开始生成")
         return
@@ -1030,6 +1157,7 @@ def _render_paste_mode(T: dict, defaults: dict):
                             result_str=_result_str,
                             excel_path=_ex_path,
                             txt_path=_txt_path,
+                            project_id=_get_current_project(),
                         )
                     except Exception:
                         pass
@@ -1220,6 +1348,7 @@ def _render_upload_mode(T: dict, defaults: dict):
                             result_str=_result_str,
                             excel_path=_ex_path,
                             txt_path=_txt_path,
+                            project_id=_get_current_project(),
                         )
                     except Exception:
                         pass
@@ -1289,7 +1418,7 @@ def _render_module_risk_report(T: dict, defaults: dict):
             label_visibility="collapsed",
         ).strip()
     else:
-        entries = list_recent(limit=20)
+        entries = list_recent(limit=20, project_id=_get_current_project())
         if not entries:
             st.info(_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档，请先在「项目记忆」页导入。")
         else:
@@ -1461,6 +1590,8 @@ def _render_module_memory(T: dict, defaults: dict):
     st.subheader(_get_text(T, "memory_tab.section_title") or "项目记忆")
     st.caption(_get_text(T, "memory_tab.caption_browse") or "导入的需求文档供 Agent 参考；先搜索查看已有内容，再按需导入。")
 
+    project_id = _get_current_project()
+
     if not MEMORY_AVAILABLE:
         st.info("当前运行环境未启用项目记忆存储（例如 sqlite3 不可用），项目记忆功能暂不可用，但生成用例功能不受影响。")
         return
@@ -1474,7 +1605,7 @@ def _render_module_memory(T: dict, defaults: dict):
         )
         kb_section = _get_text(T, "memory_tab.knowledge_section") or "Agent 知识库"
         st.markdown(f"**{kb_section}**")
-        last_updated = get_last_updated()
+        last_updated = get_last_updated(project_id=project_id)
         last_text = (
             (_get_text(T, "memory_tab.knowledge_last_updated") or "知识库最后更新时间：{time}").replace("{time}", last_updated)
             if last_updated
@@ -1484,7 +1615,7 @@ def _render_module_memory(T: dict, defaults: dict):
 
         # 自动更新：进入页面且知识库过期时触发一次
         auto_done_key = _get_module_state_key(MODULE_MEMORY, "kb_auto_done")
-        if is_knowledge_stale() and not st.session_state.get(auto_done_key, False):
+        if is_knowledge_stale(project_id=project_id) and not st.session_state.get(auto_done_key, False):
             st.session_state[auto_done_key] = True
             refresh_label = _get_text(T, "memory_tab.knowledge_auto_updating") or "知识库已过期，正在自动更新…"
             with st.spinner(refresh_label):
@@ -1495,7 +1626,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 if ok:
                     st.rerun()
                 # 失败则静默，不阻塞
-        elif is_knowledge_stale():
+        elif is_knowledge_stale(project_id=project_id):
             st.info(_get_text(T, "memory_tab.knowledge_stale_warning") or "知识库已超过 7 天未更新，建议点击【刷新知识库】或等待自动更新。")
 
         if st.button(_get_text(T, "memory_tab.knowledge_refresh_btn") or "刷新知识库", key="kb_refresh"):
@@ -1521,7 +1652,7 @@ def _render_module_memory(T: dict, defaults: dict):
         key="mem_search",
         label_visibility="collapsed",
     )
-    entries = search(kw, limit=20) if kw and kw.strip() else []
+    entries = search(kw, limit=20, project_id=project_id) if kw and kw.strip() else []
     if entries:
         for e in entries:
             label = f"【{e.get('source_type', '')}】{e.get('title', '') or e.get('source_id', '')} — {e.get('created_at', '')}"
@@ -1547,7 +1678,7 @@ def _render_module_memory(T: dict, defaults: dict):
         st.info(_get_text(T, "memory_tab.search_first") or "输入关键词搜索，或通过下方导入后搜索。")
 
     st.markdown("**" + (_get_text(T, "memory_tab.history_timeline_title") or (_get_text(T, "memory_tab.import_history_section") or "导入历史")) + "**")
-    hist = list_import_history(limit=20)
+    hist = list_import_history(limit=20, project_id=project_id)
     if hist:
         pending_entries = [
             e for e in hist if (e.get("agent_summary_status") or "pending") in ("pending", "failed")
@@ -1636,8 +1767,10 @@ def _render_module_memory(T: dict, defaults: dict):
             rowid, status = add_entry_with_dedup(
                 "manual",
                 demand_paste.strip(),
+                source_id="",
                 title=(demand_title_input or "").strip() or "需求文档",
                 summary=demand_paste[:500],
+                project_id=project_id,
             )
             if status == "skipped":
                 st.info(_get_text(T, "memory_tab.history_item_skipped") or "文件未变更，已跳过")
@@ -1658,7 +1791,11 @@ def _render_module_memory(T: dict, defaults: dict):
     st.markdown(_get_text(T, "memory_tab.test_cases_section") or "**导入全回归测试用例**")
     st.caption(_get_text(T, "memory_tab.test_cases_caption") or "上传文件或粘贴内容，Agent 将参考既有用例理解项目。")
 
-    _full_regression = get_entry_content(TEST_CASES_SOURCE_TYPE, "full_regression")
+    _full_regression = get_entry_content(
+        TEST_CASES_SOURCE_TYPE,
+        "full_regression",
+        project_id=project_id,
+    )
     if _full_regression:
         _len_chars = len(_full_regression)
         _tpl = _get_text(T, "memory_tab.full_regression_status") or "全回归用例已导入（{count} 字），生成用例时 Agent 将参考理解。"
@@ -1717,6 +1854,7 @@ def _render_module_memory(T: dict, defaults: dict):
                             source_id="full_regression",
                             title="全回归测试用例",
                             summary=content[:500],
+                            project_id=project_id,
                         )
                         if status == "skipped":
                             st.info(_get_text(T, "memory_tab.history_item_skipped") or "文件未变更，已跳过")
@@ -1741,6 +1879,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 source_id="full_regression",
                 title="全回归测试用例",
                 summary=content[:500],
+                project_id=project_id,
             )
             if status == "skipped":
                 st.info(_get_text(T, "memory_tab.history_item_skipped") or "文件未变更，已跳过")
@@ -1903,6 +2042,7 @@ def _render_module_memory(T: dict, defaults: dict):
                     source_id=file_hash[:16],
                     title=f"设计图：{file_name}",
                     summary=full_description[:500],
+                    project_id=project_id,
                 )
 
                 if status == "skipped":
@@ -1935,7 +2075,7 @@ def _render_module_memory(T: dict, defaults: dict):
 
     st.divider()
     with st.expander(_get_text(T, "memory_tab.memory_summary_section") or "项目记忆摘要（高级）", expanded=False):
-        mem = load_project_memory()
+        mem = load_project_memory(project_id=project_id)
         new_mem = st.text_area(
             _get_text(T, "memory_tab.memory_text_label") or "内容",
             value=mem, height=180, key="project_memory_text",
@@ -1944,7 +2084,11 @@ def _render_module_memory(T: dict, defaults: dict):
         with c1:
             if st.button(_get_text(T, "memory_tab.save_summary_btn") or "保存摘要", key="mem_save_summary"):
                 os.makedirs(CONFIG_DIR, exist_ok=True)
-                with open(PROJECT_MEMORY_PATH, "w", encoding="utf-8") as f:
+                if project_id == PROJECT_RM11:
+                    path = os.path.join(CONFIG_DIR, "project_memory_rm11.md")
+                else:
+                    path = PROJECT_MEMORY_PATH
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(new_mem)
                 try:
                     from context_cache_service import mark_context_cache_dirty
@@ -1960,7 +2104,14 @@ def _render_module_memory(T: dict, defaults: dict):
                     result = st.session_state["app_last_run"].get("result_str", "")[:2000]
                     addition = f"【最近一次需求摘要】\n{snippet}\n\n【产出摘要】\n{result}"
                     update_project_memory(addition)
-                    add_entry("run_summary", result, title="最近一次运行", summary=snippet)
+                    add_entry(
+                        "run_summary",
+                        result,
+                        source_id="",
+                        title="最近一次运行",
+                        summary=snippet,
+                        project_id=project_id,
+                    )
                     st.success("已追加到项目记忆")
                 else:
                     st.info(_get_text(T, "memory_tab.run_first_hint") or "请先在「生成用例」页运行一次")
@@ -1991,7 +2142,10 @@ def _render_module_chat(T: dict, defaults: dict):
                 st.info(_get_text(T, "chat_tab.doc_source_empty") or "当前运行环境未启用项目记忆存储，请使用「粘贴文档内容」模式。")
                 doc_context = ""
             else:
-                doc_context = get_all_demands_full_for_chat(limit=30).strip()
+                doc_context = get_all_demands_full_for_chat(
+                    limit=30,
+                    project_id=_get_current_project(),
+                ).strip()
                 if not doc_context:
                     st.info(_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档。请先在「项目记忆」页导入。")
     else:

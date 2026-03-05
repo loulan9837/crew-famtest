@@ -28,6 +28,9 @@ TEST_CASES_SOURCE_TYPE = "test_cases"
 # 设计图（Gemini Vision 解析后的文本描述）
 DESIGN_MOCKUP_SOURCE_TYPE = "design_mockup"
 
+# 项目标识：当前版本支持 Fambase / RM11 双项目
+DEFAULT_PROJECT_ID = "FAMBASE"
+
 _SQLITE_AVAILABLE = False
 try:
     import sqlite3  # type: ignore
@@ -56,6 +59,7 @@ class _MemoryBackend(Protocol):
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> int: ...
 
     def add_entry_with_dedup(
@@ -65,17 +69,18 @@ class _MemoryBackend(Protocol):
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> tuple[int, str]: ...
 
-    def search(self, keyword: str, limit: int = 50) -> list[dict[str, Any]]: ...
+    def search(self, keyword: str, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def delete_entry(self, entry_id: int) -> bool: ...
 
-    def list_recent(self, limit: int = 50) -> list[dict[str, Any]]: ...
+    def list_recent(self, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def update_agent_summary(self, entry_id: int, summary: str, status: str) -> bool: ...
 
-    def list_import_history(self, limit: int = 20) -> list[dict[str, Any]]: ...
+    def list_import_history(self, limit: int = 20, project_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def get_recent_for_agent(
         self,
@@ -83,6 +88,7 @@ class _MemoryBackend(Protocol):
         max_content_len: int = 3000,
         demand_only: bool = True,
         include_test_cases: bool = False,
+        project_id: str | None = None,
     ) -> str: ...
 
     def get_all_demands_full_for_chat(
@@ -90,14 +96,16 @@ class _MemoryBackend(Protocol):
         limit: int = 30,
         max_total_chars: int = 80000,
         include_test_cases: bool = True,
+        project_id: str | None = None,
     ) -> str: ...
 
-    def get_entry_content(self, source_type: str, source_id: str) -> str | None: ...
+    def get_entry_content(self, source_type: str, source_id: str, project_id: str | None = None) -> str | None: ...
 
     def list_for_browse(
         self,
         source_type_filter: str = "",
         limit: int = 50,
+        project_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
 
@@ -143,6 +151,22 @@ class SqliteBackend:
             conn.commit()
         except Exception:
             pass
+        # project_id：用于双项目工作台的项目隔离；存量数据默认视为 FAMBASE
+        try:
+            conn.execute("ALTER TABLE memory_entries ADD COLUMN project_id TEXT")
+            conn.commit()
+        except Exception:
+            # 已存在列时静默忽略
+            pass
+        try:
+            conn.execute(
+                "UPDATE memory_entries SET project_id=? WHERE project_id IS NULL OR project_id = ''",
+                (DEFAULT_PROJECT_ID,),
+            )
+            conn.commit()
+        except Exception:
+            # 迁移失败不影响读写，只是会将缺失 project_id 的旧记录视为默认项目
+            pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS memory_index (
@@ -169,6 +193,7 @@ class SqliteBackend:
         d.setdefault("agent_summary", "")
         d.setdefault("agent_summary_status", "pending")
         d.setdefault("content_hash", "")
+        d.setdefault("project_id", DEFAULT_PROJECT_ID)
         return d
 
     # 公共接口实现 ---------------------------------------------------------
@@ -180,22 +205,24 @@ class SqliteBackend:
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> int:
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         conn = self._get_conn()
         now = _now_iso()
         sid = (source_id or "").strip()
         content_hash = _compute_content_hash(content)
         if sid:
             existing = conn.execute(
-                "SELECT id FROM memory_entries WHERE source_type = ? AND source_id = ?",
-                (source_type, sid),
+                "SELECT id FROM memory_entries WHERE source_type = ? AND source_id = ? AND project_id = ?",
+                (source_type, sid, pid),
             ).fetchone()
             if existing:
                 conn.execute(
                     """UPDATE memory_entries SET created_at=?, title=?, content=?, summary=?,
-                       content_hash=?, agent_summary='', agent_summary_status='pending'
-                       WHERE source_type=? AND source_id=?""",
-                    (now, title or "", content, summary or "", content_hash, source_type, sid),
+                       content_hash=?, project_id=?, agent_summary='', agent_summary_status='pending'
+                       WHERE source_type=? AND source_id=? AND project_id=?""",
+                    (now, title or "", content, summary or "", content_hash, pid, source_type, sid, pid),
                 )
                 conn.execute(
                     """INSERT INTO memory_index (content_hash, entry_id, file_name, created_at)
@@ -208,9 +235,9 @@ class SqliteBackend:
                 return int(existing["id"])
         cur = conn.execute(
             """INSERT INTO memory_entries
-               (created_at, source_type, source_id, title, content, summary, content_hash)
-               VALUES (?,?,?,?,?,?,?)""",
-            (now, source_type, sid, title or "", content, summary or "", content_hash),
+               (created_at, source_type, source_id, title, content, summary, content_hash, project_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (now, source_type, sid, title or "", content, summary or "", content_hash, pid),
         )
         conn.commit()
         rowid = int(cur.lastrowid or 0)
@@ -230,6 +257,7 @@ class SqliteBackend:
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> tuple[int, str]:
         clean_content = (content or "").strip()
         if not clean_content:
@@ -237,26 +265,27 @@ class SqliteBackend:
         conn = self._get_conn()
         now = _now_iso()
         sid = (source_id or "").strip()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         content_hash = _compute_content_hash(clean_content)
         existing_by_hash = conn.execute(
-            "SELECT id FROM memory_entries WHERE content_hash = ? LIMIT 1",
-            (content_hash,),
+            "SELECT id FROM memory_entries WHERE content_hash = ? AND project_id = ? LIMIT 1",
+            (content_hash, pid),
         ).fetchone()
         if existing_by_hash:
             return int(existing_by_hash["id"]), "skipped"
         if sid:
             existing = conn.execute(
-                "SELECT id FROM memory_entries WHERE source_type = ? AND source_id = ?",
-                (source_type, sid),
+                "SELECT id FROM memory_entries WHERE source_type = ? AND source_id = ? AND project_id = ?",
+                (source_type, sid, pid),
             ).fetchone()
             if existing:
                 rowid = int(existing["id"])
                 conn.execute(
                     """UPDATE memory_entries
-                       SET created_at=?, title=?, content=?, summary=?, content_hash=?,
+                       SET created_at=?, title=?, content=?, summary=?, content_hash=?, project_id=?,
                            agent_summary='', agent_summary_status='pending'
                        WHERE id=?""",
-                    (now, title or "", clean_content, summary or "", content_hash, rowid),
+                    (now, title or "", clean_content, summary or "", content_hash, pid, rowid),
                 )
                 conn.execute(
                     """INSERT INTO memory_index (content_hash, entry_id, file_name, created_at)
@@ -269,9 +298,9 @@ class SqliteBackend:
                 return rowid, "updated"
         cur = conn.execute(
             """INSERT INTO memory_entries
-               (created_at, source_type, source_id, title, content, summary, content_hash)
-               VALUES (?,?,?,?,?,?,?)""",
-            (now, source_type, sid, title or "", clean_content, summary or "", content_hash),
+               (created_at, source_type, source_id, title, content, summary, content_hash, project_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (now, source_type, sid, title or "", clean_content, summary or "", content_hash, pid),
         )
         rowid = int(cur.lastrowid or 0)
         if rowid:
@@ -283,14 +312,15 @@ class SqliteBackend:
             conn.commit()
         return rowid, "added"
 
-    def search(self, keyword: str, limit: int = 50) -> list[dict[str, Any]]:
+    def search(self, keyword: str, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
         if not keyword or not keyword.strip():
-            return self.list_recent(limit=limit)
+            return self.list_recent(limit=limit, project_id=project_id)
         conn = self._get_conn()
         kw = keyword.strip()
         terms = [t.strip() for t in kw.split() if t.strip()]
         if not terms:
-            return self.list_recent(limit=limit)
+            return self.list_recent(limit=limit, project_id=project_id)
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         where_clause = " AND ".join(
             [f"(content LIKE ? OR summary LIKE ? OR title LIKE ?)" for _ in terms]
         )
@@ -299,12 +329,13 @@ class SqliteBackend:
             p = f"%{t}%"
             args_where.extend([p, p, p])
         rows = conn.execute(
-            f"""SELECT id, created_at, source_type, source_id, title, content, summary
+            f"""SELECT id, created_at, source_type, source_id, title, content, summary, agent_summary,
+                        agent_summary_status, content_hash, project_id
                 FROM memory_entries
-                WHERE {where_clause}
+                WHERE ({where_clause}) AND project_id = ?
                 ORDER BY created_at DESC
                 LIMIT ?""",
-            (*args_where, limit * 3),
+            (*args_where, pid, limit * 3),
         ).fetchall()
         entries = [self._row_to_dict(r) for r in rows]
         if not entries:
@@ -324,14 +355,17 @@ class SqliteBackend:
         conn.commit()
         return cur.rowcount > 0
 
-    def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_recent(self, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         rows = conn.execute(
-            """SELECT id, created_at, source_type, source_id, title, content, summary
+            """SELECT id, created_at, source_type, source_id, title, content, summary,
+                      agent_summary, agent_summary_status, content_hash, project_id
                FROM memory_entries
+               WHERE project_id = ?
                ORDER BY created_at DESC
                LIMIT ?""",
-            (limit,),
+            (pid, limit),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -344,22 +378,31 @@ class SqliteBackend:
         conn.commit()
         return cur.rowcount > 0
 
-    def list_import_history(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_import_history(self, limit: int = 20, project_id: str | None = None) -> list[dict[str, Any]]:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         try:
             rows = conn.execute(
                 """SELECT id, created_at, source_type, source_id, title, content, summary,
                           COALESCE(agent_summary,'') as agent_summary,
-                          COALESCE(agent_summary_status,'pending') as agent_summary_status
+                          COALESCE(agent_summary_status,'pending') as agent_summary_status,
+                          COALESCE(content_hash,'') as content_hash,
+                          COALESCE(project_id, ?) as project_id
                    FROM memory_entries
+                   WHERE COALESCE(project_id, ?) = ?
                    ORDER BY created_at DESC LIMIT ?""",
-                (limit,),
+                (pid, pid, pid, limit),
             ).fetchall()
         except Exception:
             rows = conn.execute(
-                """SELECT id, created_at, source_type, source_id, title, content, summary
-                   FROM memory_entries ORDER BY created_at DESC LIMIT ?""",
-                (limit,),
+                """SELECT id, created_at, source_type, source_id, title, content, summary,
+                          '' as agent_summary, 'pending' as agent_summary_status,
+                          COALESCE(content_hash,'') as content_hash,
+                          COALESCE(project_id, ?) as project_id
+                   FROM memory_entries
+                   WHERE COALESCE(project_id, ?) = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (pid, pid, pid, limit),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -369,8 +412,10 @@ class SqliteBackend:
         max_content_len: int = 3000,
         demand_only: bool = True,
         include_test_cases: bool = False,
+        project_id: str | None = None,
     ) -> str:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         if demand_only and not include_test_cases:
             types = DEMAND_SOURCE_TYPES
         elif include_test_cases:
@@ -380,18 +425,22 @@ class SqliteBackend:
         if types:
             placeholders = ",".join(["?"] * len(types))
             rows = conn.execute(
-                f"""SELECT id, created_at, source_type, source_id, title, content, summary
+                f"""SELECT id, created_at, source_type, source_id, title, content, summary,
+                          agent_summary, agent_summary_status, content_hash, project_id
                     FROM memory_entries
-                    WHERE source_type IN ({placeholders})
+                    WHERE source_type IN ({placeholders}) AND project_id = ?
                     ORDER BY created_at DESC
                     LIMIT ?""",
-                (*types, limit * 2),
+                (*types, pid, limit * 2),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT id, created_at, source_type, source_id, title, content, summary
-                   FROM memory_entries ORDER BY created_at DESC LIMIT ?""",
-                (limit * 2,),
+                """SELECT id, created_at, source_type, source_id, title, content, summary,
+                          agent_summary, agent_summary_status, content_hash, project_id
+                   FROM memory_entries
+                   WHERE project_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (pid, limit * 2,),
             ).fetchall()
         entries = [self._row_to_dict(r) for r in rows]
         seen: set[str] = set()
@@ -421,17 +470,20 @@ class SqliteBackend:
         limit: int = 30,
         max_total_chars: int = 80000,
         include_test_cases: bool = True,
+        project_id: str | None = None,
     ) -> str:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         types = (*DEMAND_SOURCE_TYPES, TEST_CASES_SOURCE_TYPE) if include_test_cases else DEMAND_SOURCE_TYPES
         placeholders = ",".join(["?"] * len(types))
         rows = conn.execute(
-            f"""SELECT id, created_at, source_type, source_id, title, content, summary
+            f"""SELECT id, created_at, source_type, source_id, title, content, summary,
+                      agent_summary, agent_summary_status, content_hash, project_id
                 FROM memory_entries
-                WHERE source_type IN ({placeholders})
+                WHERE source_type IN ({placeholders}) AND project_id = ?
                 ORDER BY created_at DESC
                 LIMIT ?""",
-            (*types, limit * 2),
+            (*types, pid, limit * 2),
         ).fetchall()
         entries = [self._row_to_dict(r) for r in rows]
         seen: set[str] = set()
@@ -460,11 +512,12 @@ class SqliteBackend:
                 break
         return "\n\n---\n\n".join(parts)
 
-    def get_entry_content(self, source_type: str, source_id: str) -> str | None:
+    def get_entry_content(self, source_type: str, source_id: str, project_id: str | None = None) -> str | None:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         row = conn.execute(
-            "SELECT content FROM memory_entries WHERE source_type = ? AND source_id = ?",
-            (source_type, source_id),
+            "SELECT content FROM memory_entries WHERE source_type = ? AND source_id = ? AND project_id = ?",
+            (source_type, source_id, pid),
         ).fetchone()
         return row["content"] if row else None
 
@@ -472,19 +525,27 @@ class SqliteBackend:
         self,
         source_type_filter: str = "",
         limit: int = 50,
+        project_id: str | None = None,
     ) -> list[dict[str, Any]]:
         conn = self._get_conn()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         if source_type_filter and source_type_filter.strip():
             rows = conn.execute(
-                """SELECT id, created_at, source_type, source_id, title, content, summary
-                   FROM memory_entries WHERE source_type = ? ORDER BY created_at DESC LIMIT ?""",
-                (source_type_filter.strip(), limit),
+                """SELECT id, created_at, source_type, source_id, title, content, summary,
+                          agent_summary, agent_summary_status, content_hash, project_id
+                   FROM memory_entries
+                   WHERE source_type = ? AND project_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (source_type_filter.strip(), pid, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT id, created_at, source_type, source_id, title, content, summary
-                   FROM memory_entries ORDER BY created_at DESC LIMIT ?""",
-                (limit,),
+                """SELECT id, created_at, source_type, source_id, title, content, summary,
+                          agent_summary, agent_summary_status, content_hash, project_id
+                   FROM memory_entries
+                   WHERE project_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (pid, limit),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -525,6 +586,7 @@ class JsonFileBackend:
         d.setdefault("agent_summary", "")
         d.setdefault("agent_summary_status", "pending")
         d.setdefault("content_hash", "")
+        d.setdefault("project_id", DEFAULT_PROJECT_ID)
         return d
 
     # 公共接口实现 ---------------------------------------------------------
@@ -536,15 +598,21 @@ class JsonFileBackend:
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> int:
         data = self._load()
         entries: list[dict[str, Any]] = data.get("entries", [])
         now = _now_iso()
         sid = (source_id or "").strip()
         content_hash = _compute_content_hash(content)
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         if sid:
             for e in entries:
-                if e.get("source_type") == source_type and (e.get("source_id") or "") == sid:
+                if (
+                    e.get("source_type") == source_type
+                    and (e.get("source_id") or "") == sid
+                    and (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+                ):
                     e.update(
                         {
                             "created_at": now,
@@ -554,6 +622,7 @@ class JsonFileBackend:
                             "content_hash": content_hash,
                             "agent_summary": "",
                             "agent_summary_status": "pending",
+                            "project_id": pid,
                         }
                     )
                     self._save()
@@ -570,6 +639,7 @@ class JsonFileBackend:
             "content_hash": content_hash,
             "agent_summary": "",
             "agent_summary_status": "pending",
+            "project_id": pid,
         }
         entries.append(entry)
         data["next_id"] = new_id + 1
@@ -583,6 +653,7 @@ class JsonFileBackend:
         source_id: str = "",
         title: str = "",
         summary: str = "",
+        project_id: str | None = None,
     ) -> tuple[int, str]:
         clean_content = (content or "").strip()
         if not clean_content:
@@ -592,13 +663,18 @@ class JsonFileBackend:
         now = _now_iso()
         sid = (source_id or "").strip()
         content_hash = _compute_content_hash(clean_content)
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         for e in entries:
-            if e.get("content_hash"):
+            if e.get("content_hash") and (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid:
                 if e.get("content_hash") == content_hash:
                     return int(e.get("id")), "skipped"
         if sid:
             for e in entries:
-                if e.get("source_type") == source_type and (e.get("source_id") or "") == sid:
+                if (
+                    e.get("source_type") == source_type
+                    and (e.get("source_id") or "") == sid
+                    and (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+                ):
                     e.update(
                         {
                             "created_at": now,
@@ -608,6 +684,7 @@ class JsonFileBackend:
                             "content_hash": content_hash,
                             "agent_summary": "",
                             "agent_summary_status": "pending",
+                            "project_id": pid,
                         }
                     )
                     self._save()
@@ -624,6 +701,7 @@ class JsonFileBackend:
             "content_hash": content_hash,
             "agent_summary": "",
             "agent_summary_status": "pending",
+            "project_id": pid,
         }
         entries.append(entry)
         data["next_id"] = new_id + 1
@@ -635,14 +713,19 @@ class JsonFileBackend:
         entries: list[dict[str, Any]] = data.get("entries", [])
         return sorted(entries, key=lambda e: e.get("created_at", ""), reverse=True)
 
-    def search(self, keyword: str, limit: int = 50) -> list[dict[str, Any]]:
+    def search(self, keyword: str, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
         if not keyword or not keyword.strip():
-            return self.list_recent(limit=limit)
+            return self.list_recent(limit=limit, project_id=project_id)
         kw = keyword.strip()
         terms = [t.strip() for t in kw.split() if t.strip()]
         if not terms:
-            return self.list_recent(limit=limit)
-        entries = [self._row_to_dict(e) for e in self._sorted_entries()]
+            return self.list_recent(limit=limit, project_id=project_id)
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            self._row_to_dict(e)
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ]
         results: list[dict[str, Any]] = []
         for e in entries:
             text = f"{e.get('title','')} {e.get('summary','')} {e.get('content','')}"
@@ -668,8 +751,13 @@ class JsonFileBackend:
             self._save()
         return changed
 
-    def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        entries = self._sorted_entries()[:limit]
+    def list_recent(self, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            e
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ][:limit]
         return [self._row_to_dict(e) for e in entries]
 
     def update_agent_summary(self, entry_id: int, summary: str, status: str) -> bool:
@@ -683,8 +771,13 @@ class JsonFileBackend:
                 return True
         return False
 
-    def list_import_history(self, limit: int = 20) -> list[dict[str, Any]]:
-        entries = self._sorted_entries()[:limit]
+    def list_import_history(self, limit: int = 20, project_id: str | None = None) -> list[dict[str, Any]]:
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            e
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ][:limit]
         return [self._row_to_dict(e) for e in entries]
 
     def get_recent_for_agent(
@@ -693,8 +786,14 @@ class JsonFileBackend:
         max_content_len: int = 3000,
         demand_only: bool = True,
         include_test_cases: bool = False,
+        project_id: str | None = None,
     ) -> str:
-        entries = self._sorted_entries()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            e
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ]
         if demand_only and not include_test_cases:
             types = set(DEMAND_SOURCE_TYPES)
         elif include_test_cases:
@@ -730,8 +829,14 @@ class JsonFileBackend:
         limit: int = 30,
         max_total_chars: int = 80000,
         include_test_cases: bool = True,
+        project_id: str | None = None,
     ) -> str:
-        entries = self._sorted_entries()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            e
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ]
         types = set((*DEMAND_SOURCE_TYPES, TEST_CASES_SOURCE_TYPE)) if include_test_cases else set(DEMAND_SOURCE_TYPES)
         entries = [e for e in entries if e.get("source_type") in types]
         seen: set[str] = set()
@@ -760,11 +865,16 @@ class JsonFileBackend:
                 break
         return "\n\n---\n\n".join(parts)
 
-    def get_entry_content(self, source_type: str, source_id: str) -> str | None:
+    def get_entry_content(self, source_type: str, source_id: str, project_id: str | None = None) -> str | None:
         data = self._load()
         entries: list[dict[str, Any]] = data.get("entries", [])
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
         for e in entries:
-            if e.get("source_type") == source_type and (e.get("source_id") or "") == source_id:
+            if (
+                e.get("source_type") == source_type
+                and (e.get("source_id") or "") == source_id
+                and (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+            ):
                 return str(e.get("content") or "")
         return None
 
@@ -772,8 +882,14 @@ class JsonFileBackend:
         self,
         source_type_filter: str = "",
         limit: int = 50,
+        project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        entries = self._sorted_entries()
+        pid = (project_id or DEFAULT_PROJECT_ID).upper()
+        entries = [
+            e
+            for e in self._sorted_entries()
+            if (e.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid
+        ]
         if source_type_filter and source_type_filter.strip():
             entries = [e for e in entries if e.get("source_type") == source_type_filter.strip()]
         entries = entries[:limit]
@@ -792,8 +908,16 @@ def add_entry(
     source_id: str = "",
     title: str = "",
     summary: str = "",
+    project_id: str | None = None,
 ) -> int:
-    return _backend.add_entry(source_type, content, source_id=source_id, title=title, summary=summary)
+    return _backend.add_entry(
+        source_type,
+        content,
+        source_id=source_id,
+        title=title,
+        summary=summary,
+        project_id=project_id,
+    )
 
 
 def add_entry_with_dedup(
@@ -802,6 +926,7 @@ def add_entry_with_dedup(
     source_id: str = "",
     title: str = "",
     summary: str = "",
+    project_id: str | None = None,
 ) -> tuple[int, str]:
     return _backend.add_entry_with_dedup(
         source_type,
@@ -809,27 +934,28 @@ def add_entry_with_dedup(
         source_id=source_id,
         title=title,
         summary=summary,
+        project_id=project_id,
     )
 
 
-def search(keyword: str, limit: int = 50) -> list[dict[str, Any]]:
-    return _backend.search(keyword, limit=limit)
+def search(keyword: str, limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
+    return _backend.search(keyword, limit=limit, project_id=project_id)
 
 
 def delete_entry(entry_id: int) -> bool:
     return _backend.delete_entry(entry_id)
 
 
-def list_recent(limit: int = 50) -> list[dict[str, Any]]:
-    return _backend.list_recent(limit=limit)
+def list_recent(limit: int = 50, project_id: str | None = None) -> list[dict[str, Any]]:
+    return _backend.list_recent(limit=limit, project_id=project_id)
 
 
 def update_agent_summary(entry_id: int, summary: str, status: str) -> bool:
     return _backend.update_agent_summary(entry_id, summary, status)
 
 
-def list_import_history(limit: int = 20) -> list[dict[str, Any]]:
-    return _backend.list_import_history(limit=limit)
+def list_import_history(limit: int = 20, project_id: str | None = None) -> list[dict[str, Any]]:
+    return _backend.list_import_history(limit=limit, project_id=project_id)
 
 
 def get_recent_for_agent(
@@ -837,12 +963,14 @@ def get_recent_for_agent(
     max_content_len: int = 3000,
     demand_only: bool = True,
     include_test_cases: bool = False,
+    project_id: str | None = None,
 ) -> str:
     return _backend.get_recent_for_agent(
         limit=limit,
         max_content_len=max_content_len,
         demand_only=demand_only,
         include_test_cases=include_test_cases,
+        project_id=project_id,
     )
 
 
@@ -850,20 +978,31 @@ def get_all_demands_full_for_chat(
     limit: int = 30,
     max_total_chars: int = 80000,
     include_test_cases: bool = True,
+    project_id: str | None = None,
 ) -> str:
     return _backend.get_all_demands_full_for_chat(
         limit=limit,
         max_total_chars=max_total_chars,
         include_test_cases=include_test_cases,
+        project_id=project_id,
     )
 
 
-def get_entry_content(source_type: str, source_id: str) -> str | None:
-    return _backend.get_entry_content(source_type, source_id)
+def get_entry_content(
+    source_type: str,
+    source_id: str,
+    project_id: str | None = None,
+) -> str | None:
+    return _backend.get_entry_content(source_type, source_id, project_id=project_id)
 
 
 def list_for_browse(
     source_type_filter: str = "",
     limit: int = 50,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    return _backend.list_for_browse(source_type_filter=source_type_filter, limit=limit)
+    return _backend.list_for_browse(
+        source_type_filter=source_type_filter,
+        limit=limit,
+        project_id=project_id,
+    )

@@ -1101,9 +1101,31 @@ def _save_result(
     return out_path, timestamp
 
 
-def load_project_memory(path: str | None = None) -> str:
+DEFAULT_PROJECT_ID = "FAMBASE"
+
+
+def _normalize_project_id(project_id: str | None) -> str:
+    pid = (project_id or DEFAULT_PROJECT_ID).upper()
+    if pid not in ("FAMBASE", "RM11"):
+        return DEFAULT_PROJECT_ID
+    return pid
+
+
+def _get_project_memory_path(project_id: str | None = None) -> str:
+    """根据项目返回对应的 project_memory 文件路径。
+
+    - FAMBASE：沿用现有 project_memory.md（兼容存量数据）
+    - RM11：使用 project_memory_rm11.md
+    """
+    pid = _normalize_project_id(project_id)
+    if pid == "RM11":
+        return os.path.join(CONFIG_DIR, "project_memory_rm11.md")
+    return PROJECT_MEMORY_PATH
+
+
+def load_project_memory(path: str | None = None, project_id: str | None = None) -> str:
     """读取项目记忆文件内容，用于注入 Agent 上下文。"""
-    p = path or PROJECT_MEMORY_PATH
+    p = path or _get_project_memory_path(project_id)
     if not os.path.isfile(p):
         return ""
     try:
@@ -1113,8 +1135,14 @@ def load_project_memory(path: str | None = None) -> str:
         return ""
 
 
-def load_fambase_modules_for_agent(path: str | None = None) -> str:
-    """加载 Fambase 模块定义，格式化为供 Agent 使用的文本。用于主模块/子模块与用例编号（主模块缩写-序号）。"""
+def load_fambase_modules_for_agent(path: str | None = None, project_id: str | None = None) -> str:
+    """加载模块定义，格式化为供 Agent 使用的文本。
+
+    当前仅 Fambase 定义了模块映射；RM11 暂无专用映射文件，直接返回空字符串。
+    """
+    pid = _normalize_project_id(project_id)
+    if pid != "FAMBASE":
+        return ""
     p = path or FAMBASE_MODULES_PATH
     if not os.path.isfile(p) or not yaml:
         return ""
@@ -1136,23 +1164,37 @@ def load_fambase_modules_for_agent(path: str | None = None) -> str:
 
 
 def get_project_context_for_agent(include_store: bool = True) -> str:
-    """获取供 Agent 使用的项目上下文：知识库存在时用 project_memory + agent_knowledge，否则沿用原逻辑。"""
-    md_ctx = load_project_memory()
-    mod_ctx = load_fambase_modules_for_agent()
+    """获取供 Agent 使用的项目上下文：知识库存在时用 project_memory + agent_knowledge，否则沿用原逻辑。
+
+    为兼容双项目工作台，当前项目通过环境变量 APP_CURRENT_PROJECT 约定：
+    - 未显式设置时，默认视为 FAMBASE；
+    - RM11 项目将使用独立的 project_memory 与 Agent 知识库文件。
+    """
+    project_id = _normalize_project_id(os.environ.get("APP_CURRENT_PROJECT"))
+
+    md_ctx = load_project_memory(project_id=project_id)
+    mod_ctx = load_fambase_modules_for_agent(project_id=project_id)
     if mod_ctx:
         md_ctx = (md_ctx + "\n\n" + mod_ctx).strip() if md_ctx else mod_ctx
     if not include_store:
         return md_ctx
     try:
         from agent_knowledge_service import load_agent_knowledge
-        kb = load_agent_knowledge()
+
+        kb = load_agent_knowledge(project_id=project_id)
         if kb:
             return (md_ctx + "\n\n【Agent 知识库】\n\n" + kb).strip() if md_ctx else kb
     except ImportError:
         pass
     try:
         from memory_store import get_recent_for_agent
-        store_ctx = get_recent_for_agent(limit=10, demand_only=True, include_test_cases=True)
+
+        store_ctx = get_recent_for_agent(
+            limit=10,
+            demand_only=True,
+            include_test_cases=True,
+            project_id=project_id,
+        )
         if store_ctx:
             md_ctx = (md_ctx + "\n\n【近期需求与产出记录】\n" + store_ctx).strip()
     except ImportError:
@@ -1162,7 +1204,8 @@ def get_project_context_for_agent(include_store: bool = True) -> str:
 
 def update_project_memory(addition: str, path: str | None = None, max_chars: int = 20000) -> None:
     """在项目记忆文件末尾追加一段摘要，便于 Agent 保持对项目的熟悉。若超过 max_chars 则只保留尾部。"""
-    p = path or PROJECT_MEMORY_PATH
+    project_id = _normalize_project_id(os.environ.get("APP_CURRENT_PROJECT"))
+    p = path or _get_project_memory_path(project_id)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     existing = load_project_memory(p)
     sep = "\n\n---\n\n"

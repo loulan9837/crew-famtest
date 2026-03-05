@@ -15,6 +15,8 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 HISTORY_JSON = os.path.join(OUTPUT_DIR, "generate_history.json")
 _MAX_RECORDS = 100
 
+DEFAULT_PROJECT_ID = "FAMBASE"
+
 
 def _ensure_output_in_allowed_dir(path: str) -> bool:
     """校验路径在 output 目录内，防御目录遍历。"""
@@ -36,6 +38,10 @@ def _load_history() -> list[dict[str, Any]]:
         items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
         if not isinstance(items, list):
             return []
+        # 兼容旧版本：未写入 project_id 的记录视为 FAMBASE
+        for r in items:
+            if "project_id" not in r or not r.get("project_id"):
+                r["project_id"] = DEFAULT_PROJECT_ID
         items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return items
     except Exception:
@@ -73,11 +79,13 @@ def add_run_record(
     excel_path: str | None = None,
     txt_path: str | None = None,
     sheets_url: str | None = None,
+    project_id: str | None = None,
 ) -> str | None:
     """追加一条生成记录。返回 record_id，失败返回 None。
     result_str 可存全文或预览；若提供 txt_path 则展示时优先从文件读取。"""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     rid = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pid = (project_id or DEFAULT_PROJECT_ID).upper()
     preview = str(result_str or "")[:800]
     record = {
         "id": rid,
@@ -88,6 +96,7 @@ def add_run_record(
         "excel_path": excel_path or "",
         "txt_path": txt_path or "",
         "sheets_url": sheets_url or "",
+        "project_id": pid,
     }
     items = _load_history()
     items.insert(0, record)
@@ -96,9 +105,15 @@ def add_run_record(
     return rid if _save_history(items) else None
 
 
-def list_run_records(keyword: str = "", limit: int = 20) -> list[dict[str, Any]]:
+def list_run_records(
+    keyword: str = "",
+    limit: int = 20,
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
     """按关键字过滤并返回历史记录，按时间倒序。limit 默认 20。"""
     items = _load_history()
+    pid = (project_id or DEFAULT_PROJECT_ID).upper()
+    items = [r for r in items if (r.get("project_id") or DEFAULT_PROJECT_ID).upper() == pid]
     if keyword:
         kw = keyword.strip().lower()
         items = [r for r in items if kw in (r.get("demand_title") or "").lower() or kw in (r.get("source_type") or "").lower()]
