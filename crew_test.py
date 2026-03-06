@@ -761,6 +761,97 @@ def _parse_markdown_tables_inner(text: str) -> list[list[list[str]]]:
     return tables
 
 
+def _extract_case_table_from_reply(content: str) -> str | None:
+    """从 Agent 回复中提取 <case_table> 内的 Markdown 表格，供未来一键合入使用。"""
+    m = re.search(r"<case_table>\\s*([\\s\\S]*?)\\s*</case_table>", content or "", re.IGNORECASE)
+    if not m:
+        return None
+    return str(m.group(1) or "").strip() or None
+
+
+def chat_with_cases_agent(
+    user_message: str,
+    prd_context: str,
+    cases_context: str,
+    conversation_history: list[dict[str, str]] | None = None,
+    project_context: str = "",
+) -> str:
+    """与测试用例顾问 Agent 多轮对话。"""
+    if not user_message or not user_message.strip():
+        return "请输入你的问题或指令。"
+
+    gemini_api_key = os.getenv("GEMINI_API_KEY") or ""
+    if not gemini_api_key:
+        raise ValueError("GEMINI_API_KEY 未设置，请先在「设置」中配置。")
+
+    model_name = _resolve_gemini_model(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
+    llm = _build_gemini_llm(model_name, gemini_api_key)
+
+    def _build_case_chat_prompt() -> str:
+        parts: list[str] = []
+        parts.append("你是一位资深的测试用例顾问（Test Case Advisor），拥有丰富的测试开发经验。")
+        parts.append("")
+
+        prd_full = (prd_context or "").strip()
+        cases_full = (cases_context or "").strip()
+        if prd_full:
+            parts.append("=== 需求文档 ===")
+            parts.append(prd_full)
+            parts.append("")
+        if cases_full:
+            parts.append("=== 现有用例表 ===")
+            parts.append(cases_full)
+            parts.append("")
+        if project_context:
+            proj = (project_context or "")[:5000]
+            parts.append("=== 项目记忆 ===")
+            parts.append(proj)
+            parts.append("")
+
+        parts.append("=== 产出规范（输出用例时必须遵守）===")
+        parts.append("1. 表头固定：ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果")
+        parts.append("2. 中英/数字边界不得出现空格（如：点击Save按钮）")
+        parts.append("3. 预期结果绝对去动词化，不得出现“点击”“查看”等动作词")
+        parts.append("4. 新增用例ID从当前最大ID+1开始，修改用例保留原始ID")
+        parts.append("5. 当回复中包含具体测试用例表格时，必须且只能将表格放在 <case_table> 与 </case_table> 标签内部；解释性文字写在标签外")
+        parts.append("6. 回复时先简要说明分析思路（2-3句），再给出具体用例表格或修改建议")
+        parts.append("7. 发现修改请求与现有逻辑冲突时，必须主动提醒")
+        parts.append("")
+
+        history = (conversation_history or [])[-20:]
+        if history:
+            parts.append("=== 对话历史 ===")
+            for msg in history:
+                role_label = "用户" if msg.get("role") == "user" else "顾问"
+                parts.append(f"[{role_label}] {msg.get('content', '')}")
+            parts.append("")
+
+        parts.append("=== 用户当前问题 ===")
+        parts.append(user_message)
+
+        return "\n".join(parts)
+
+    full_prompt = _build_case_chat_prompt()
+    safe_prompt = desensitize_for_llm(full_prompt)
+
+    agent = Agent(
+        role="Test Case Advisor",
+        goal="围绕测试用例进行多轮对话，协助用户补充、修改、优化测试用例",
+        backstory="你是一位资深测试用例顾问，熟悉各类测试方法论。你能基于需求文档和现有用例，帮助用户发现遗漏场景、优化用例质量、评估回归风险。",
+        llm=llm,
+        verbose=True,
+    )
+    task = Task(
+        description=safe_prompt,
+        expected_output="基于需求和用例上下文的专业回复，包含分析思路和具体用例建议",
+        agent=agent,
+    )
+    crew = Crew(agents=[agent], tasks=[task], verbose=True)
+    result = crew.kickoff()
+    out = getattr(result, "raw", result)
+    return str(out).strip() if out else ""
+
+
 def _compute_next_id_from_table(table: list[list[str]]) -> str:
     """从用例表中计算下一个可用用例 ID（按首列，取最后一条非空 ID）。"""
     if not table or len(table) < 2:

@@ -24,6 +24,7 @@ from crew_test import (
     _resolve_gemini_model,
     _sanitize_cell_for_excel,
     chat_with_document_agent,
+    chat_with_cases_agent,
     export_tables_to_excel_bytes,
     generate_incremental_cases,
     get_project_context_for_agent,
@@ -107,6 +108,7 @@ MODULE_AGENTS = "agents"
 MODULE_MEMORY = "memory"
 MODULE_CHAT = "chat"
 MODULE_RISK_REPORT = "risk_report"
+MODULE_CASE_CHAT = "case_chat"
 MODULE_SETTINGS = "settings"
 
 PROJECT_FAMBASE = "FAMBASE"
@@ -453,6 +455,7 @@ def _load_workbench_apps(T: dict) -> list[dict]:
         {"id": MODULE_AGENTS, "label": _get_text(T, "tabs.agents") or "编辑 Agent"},
         {"id": MODULE_MEMORY, "label": _get_text(T, "tabs.memory") or "项目记忆"},
         {"id": MODULE_CHAT, "label": _get_text(T, "tabs.chat") or "文档问答"},
+        {"id": MODULE_CASE_CHAT, "label": _get_text(T, "tabs.case_chat") or "用例对话"},
         {"id": MODULE_SETTINGS, "label": _get_text(T, "app.settings") or "设置"},
     ]
 
@@ -1051,7 +1054,7 @@ def _render_main_app(T: dict, cookies=None):
         st.markdown("**工作台**")
         for app in workbench_apps:
             module_id = app["id"]
-            if module_id in (MODULE_RUN, MODULE_RISK_REPORT, MODULE_MEMORY, MODULE_CHAT):
+            if module_id in (MODULE_RUN, MODULE_RISK_REPORT, MODULE_MEMORY, MODULE_CHAT, MODULE_CASE_CHAT):
                 if st.button(
                     app["label"],
                     key=f"nav_{module_id}",
@@ -1108,6 +1111,8 @@ def _render_main_app(T: dict, cookies=None):
         _render_module_memory(T, defaults)
     elif current_page == MODULE_CHAT:
         _render_module_chat(T, defaults)
+    elif current_page == MODULE_CASE_CHAT:
+        _render_module_case_chat(T, defaults)
     elif current_page == MODULE_SETTINGS:
         _render_module_settings(T, defaults)
     else:
@@ -2603,6 +2608,300 @@ def _render_module_chat(T: dict, defaults: dict):
         st.rerun()
     elif user_input and not doc_context:
         st.warning(_get_text(T, "chat_tab.doc_source_empty") or "请先选择并加载文档内容。")
+
+
+def _parse_next_case_id_from_md(md: str) -> str | None:
+    """从用例 Markdown 快照中解析当前最大 ID，返回下一 ID（如 FAM-016）。"""
+    import re as _re
+
+    if not (md or "").strip():
+        return None
+    matches = _re.findall(r"^\\|\\s*([A-Za-z]+-\\d+)\\s*\\|", md, _re.MULTILINE)
+    if not matches:
+        return None
+
+    def _key(m: str) -> tuple[str, int]:
+        prefix, num = m.rsplit("-", 1)
+        return prefix, int(num) if num.isdigit() else 0
+
+    last = max(matches, key=_key)
+    p, n = last.rsplit("-", 1)
+    next_n = int(n) + 1 if n.isdigit() else 1
+    return f"{p}-{next_n:03d}"
+
+
+def _render_module_case_chat(T: dict, defaults: dict) -> None:
+    """工作台模块：用例对话。"""
+    import re as _re
+
+    st.subheader(_get_text(T, "case_chat_tab.section_title") or "用例对话")
+    st.caption(
+        _get_text(T, "case_chat_tab.section_desc")
+        or "与 Agent 多轮对话，逐步补充、修改和优化测试用例。"
+    )
+
+    def _key(suffix: str) -> str:
+        return f"case_chat_{suffix}"
+
+    project_id = _get_current_project()
+
+    # 历史对话列表
+    with st.expander(_get_text(T, "case_chat_tab.history_expander") or "对话历史", expanded=False):
+        keyword = st.text_input(
+            _get_text(T, "case_chat_tab.history_search_placeholder") or "按标题搜索历史对话…",
+            key=_key("history_search"),
+            label_visibility="collapsed",
+        )
+        try:
+            from case_conversation_store import list_conversations, delete_conversation, get_conversation
+        except ImportError:
+            st.caption("对话存储模块未就绪")
+        else:
+            convs = list_conversations(
+                keyword=(keyword or "").strip(),
+                limit=20,
+                project_id=project_id,
+            )
+            if not convs:
+                st.info(_get_text(T, "case_chat_tab.history_empty") or "暂无历史对话")
+            else:
+                delete_confirm = st.session_state.get(_key("delete_confirm_id"))
+                for conv in convs:
+                    cid = conv.get("id", "")
+                    cols = st.columns([5, 1, 1])
+                    with cols[0]:
+                        title = conv.get("title", "") or "无标题"
+                        msg_count = conv.get("message_count", 0)
+                        updated = conv.get("updated_at", "")
+                        st.markdown(f"**{title}**  \n{msg_count}条消息 · {updated}")
+                    with cols[1]:
+                        if st.button(
+                            _get_text(T, "case_chat_tab.history_resume_btn") or "恢复",
+                            key=f"conv_resume_{cid}",
+                        ):
+                            full = get_conversation(cid)
+                            if full:
+                                st.session_state[_key("current_conv_id")] = cid
+                                st.session_state[_key("messages")] = full.get("messages", [])
+                                st.session_state[_key("prd_context")] = full.get("prd_snapshot", "")
+                                st.session_state[_key("cases_context")] = full.get("cases_snapshot_md", "")
+                                st.rerun()
+                    with cols[2]:
+                        if delete_confirm == cid:
+                            if st.button(
+                                _get_text(T, "case_chat_tab.history_delete_confirm") or "确认删除",
+                                key=f"conv_del_confirm_{cid}",
+                                type="primary",
+                            ):
+                                delete_conversation(cid)
+                                st.session_state[_key("delete_confirm_id")] = None
+                                if st.session_state.get(_key("current_conv_id")) == cid:
+                                    st.session_state[_key("current_conv_id")] = None
+                                    st.session_state[_key("messages")] = []
+                                    st.session_state[_key("prd_context")] = ""
+                                    st.session_state[_key("cases_context")] = ""
+                                st.rerun()
+                        else:
+                            if st.button(
+                                _get_text(T, "case_chat_tab.history_delete_btn") or "删除",
+                                key=f"conv_del_{cid}",
+                            ):
+                                st.session_state[_key("delete_confirm_id")] = cid
+                                st.rerun()
+
+    st.divider()
+
+    conv_id = st.session_state.get(_key("current_conv_id"))
+
+    # 新建对话来源（仅在无活跃对话时）
+    if not conv_id:
+        source_mode = st.radio(
+            _get_text(T, "case_chat_tab.source_label") or "对话来源",
+            options=["history", "paste"],
+            format_func=lambda x: {
+                "history": _get_text(T, "case_chat_tab.source_history") or "从历史生成记录选择",
+                "paste": _get_text(T, "case_chat_tab.source_paste") or "手动粘贴需求与用例",
+            }.get(x, x),
+            key=_key("source_mode"),
+            horizontal=True,
+        )
+
+        prd_ctx = ""
+        cases_ctx = ""
+
+        if source_mode == "history":
+            try:
+                from run_history import list_run_records, get_full_result
+            except ImportError:
+                st.info(_get_text(T, "case_chat_tab.source_history_empty") or "暂无生成记录")
+            else:
+                records = list_run_records(limit=20, project_id=project_id)
+                if not records:
+                    st.info(_get_text(T, "case_chat_tab.source_history_empty") or "暂无生成记录")
+                else:
+                    sel = st.selectbox(
+                        _get_text(T, "case_chat_tab.source_history_select") or "选择需求",
+                        options=records,
+                        format_func=lambda r: f"{(r.get('demand_title') or '无标题')[:40]} · {r.get('timestamp', '')}",
+                        key=_key("history_select"),
+                    )
+                    if sel:
+                        prd_ctx = str(sel.get("demand_title") or "")
+                        cases_ctx = get_full_result(sel, extra_allowed_dirs=[_get_output_dir()])
+        else:
+            prd_ctx = st.text_area(
+                _get_text(T, "case_chat_tab.paste_prd_placeholder") or "粘贴需求文档内容",
+                height=120,
+                key=_key("paste_prd"),
+            ).strip()
+            cases_ctx = st.text_area(
+                _get_text(T, "case_chat_tab.paste_cases_placeholder") or "粘贴现有用例（可选）",
+                height=120,
+                key=_key("paste_cases"),
+            ).strip()
+
+        st.session_state[_key("prd_context")] = prd_ctx
+        st.session_state[_key("cases_context")] = cases_ctx
+        if not conv_id and not (prd_ctx or cases_ctx):
+            st.info("请选择需求来源或粘贴上下文后开始对话。")
+            return
+
+    # 有活跃对话：展示元信息与结束按钮
+    conv_id = st.session_state.get(_key("current_conv_id"))
+    if conv_id:
+        try:
+            from case_conversation_store import get_conversation
+            conv = get_conversation(conv_id)
+            if conv:
+                created = conv.get("created_at", "")
+                st.caption(f"对话创建于 {created}")
+        except ImportError:
+            pass
+
+        if st.button(
+            _get_text(T, "case_chat_tab.end_conversation_btn") or "结束当前对话",
+            key=_key("end_conv"),
+        ):
+            st.session_state[_key("current_conv_id")] = None
+            st.session_state[_key("messages")] = []
+            st.session_state[_key("prd_context")] = ""
+            st.session_state[_key("cases_context")] = ""
+            st.rerun()
+
+    # 对话消息流与输入
+    messages = st.session_state.get(_key("messages"), []) or []
+    for msg in messages:
+        role = msg.get("role") or "assistant"
+        with st.chat_message("user" if role == "user" else "assistant"):
+            st.markdown(msg.get("content") or "")
+
+    prd_ctx = st.session_state.get(_key("prd_context"), "")
+    cases_ctx = st.session_state.get(_key("cases_context"), "")
+
+    if prd_ctx or cases_ctx:
+        cols = st.columns(4)
+        next_id_hint = _parse_next_case_id_from_md(cases_ctx) or "当前最大ID+1"
+        quick_cmds = [
+            (
+                _get_text(T, "case_chat_tab.quick_coverage") or "分析用例覆盖度",
+                "请分析当前用例表的覆盖度，指出遗漏的功能点和极端场景",
+                False,
+            ),
+            (
+                _get_text(T, "case_chat_tab.quick_extreme") or "补充极端场景",
+                "请针对当前需求，补充断网恢复、杀进程重启、边界值极限等极端场景的测试用例。注意：新增用例的ID必须严格从 {next_id} 开始递增。",
+                True,
+            ),
+            (
+                _get_text(T, "case_chat_tab.quick_check_format") or "检查预期结果规范",
+                "请检查现有用例表中所有预期结果的规范性：是否含有动词、是否需要编号、格式是否统一。",
+                False,
+            ),
+            (
+                _get_text(T, "case_chat_tab.quick_regression") or "回归风险评估",
+                "请评估当前需求的新逻辑对既有功能的潜在回归风险，并补充回归验证用例。新增用例的ID必须从 {next_id} 开始递增。",
+                True,
+            ),
+        ]
+        for i, (label, tpl, need_id) in enumerate(quick_cmds):
+            with cols[i]:
+                cmd = tpl.replace("{next_id}", next_id_hint) if need_id else tpl
+                if st.button(label, key=_key(f"quick_{i}")):
+                    _case_chat_send_message(cmd, defaults, messages_key=_key("messages"))
+                    st.rerun()
+
+    user_msg = st.chat_input(
+        _get_text(T, "case_chat_tab.chat_placeholder") or "输入消息，与 Agent 讨论用例…"
+    )
+    if user_msg:
+        _case_chat_send_message(user_msg.strip(), defaults, messages_key=_key("messages"))
+        st.rerun()
+
+
+def _case_chat_send_message(user_msg: str, defaults: dict, messages_key: str) -> None:
+    """发送用户消息并调用用例对话 Agent。"""
+    from datetime import datetime
+
+    try:
+        from case_conversation_store import create_conversation, append_message
+    except ImportError:
+        st.error("对话存储模块未就绪，无法保存对话。")
+        return
+
+    prefix = "case_chat_"
+    prd_ctx_key = prefix + "prd_context"
+    cases_ctx_key = prefix + "cases_context"
+    conv_id_key = prefix + "current_conv_id"
+
+    prd_ctx = st.session_state.get(prd_ctx_key, "")
+    cases_ctx = st.session_state.get(cases_ctx_key, "")
+    conv_id = st.session_state.get(conv_id_key)
+
+    messages = st.session_state.get(messages_key, []) or []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_entry = {"role": "user", "content": user_msg, "timestamp": now_str}
+    messages.append(user_entry)
+    st.session_state[messages_key] = messages
+
+    if not conv_id:
+        title_source = (prd_ctx or user_msg or "").strip()
+        title = (title_source[:30] + "…") if len(title_source) > 30 else (title_source or "用例对话")
+        conv_id = create_conversation(
+            title=title,
+            prd_snapshot=prd_ctx,
+            cases_snapshot_md=cases_ctx,
+            project_id=_get_current_project(),
+        )
+        st.session_state[conv_id_key] = conv_id
+
+    if conv_id:
+        append_message(conv_id, "user", user_msg)
+
+    history_for_agent = [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages[:-1]]
+
+    reply: str
+    try:
+        os.environ["GEMINI_API_KEY"] = defaults.get("gemini_key") or os.environ.get("GEMINI_API_KEY", "")
+        os.environ["GEMINI_MODEL"] = defaults.get("gemini_model") or os.environ.get(
+            "GEMINI_MODEL", "gemini-2.5-flash-lite"
+        )
+        reply = chat_with_cases_agent(
+            user_message=user_msg,
+            prd_context=prd_ctx or "",
+            cases_context=cases_ctx or "",
+            conversation_history=history_for_agent,
+            project_context=get_project_context_for_agent(include_store=False),
+        )
+    except Exception as e:
+        reply = f"调用失败: {e}"
+
+    now_str2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    assistant_entry = {"role": "assistant", "content": reply, "timestamp": now_str2}
+    messages.append(assistant_entry)
+    st.session_state[messages_key] = messages
+
+    if conv_id:
+        append_message(conv_id, "assistant", reply)
 
 
 def _render_module_settings(T: dict, defaults: dict):
