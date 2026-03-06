@@ -24,7 +24,6 @@ from crew_test import (
     _resolve_gemini_model,
     _sanitize_cell_for_excel,
     chat_with_document_agent,
-    chat_with_cases_agent,
     export_tables_to_excel_bytes,
     generate_incremental_cases,
     get_project_context_for_agent,
@@ -156,6 +155,8 @@ def _has_unsaved_project_state() -> bool:
         return True
     if (s.get("risk_report_paste") or "").strip():
         return True
+    if s.get("case_chat_prd_context") or s.get("case_chat_cases_context") or s.get("case_chat_messages"):
+        return True
     return False
 
 
@@ -170,6 +171,7 @@ def _clear_project_related_state() -> None:
         "app_memory_",
         "app_doc_chat_",
         "app_risk_report_",
+        "case_chat_",
     ]
     for key in list(st.session_state.keys()):
         if any(key.startswith(p) for p in prefixes):
@@ -1112,7 +1114,12 @@ def _render_main_app(T: dict, cookies=None):
     elif current_page == MODULE_CHAT:
         _render_module_chat(T, defaults)
     elif current_page == MODULE_CASE_CHAT:
-        _render_module_case_chat(T, defaults)
+        try:
+            _render_module_case_chat(T, defaults)
+        except ImportError as e:
+            st.error(f"用例对话模块依赖加载失败：{e}，请检查运行环境或刷新页面。")
+        except Exception as e:
+            st.error(f"用例对话模块异常：{e}")
     elif current_page == MODULE_SETTINGS:
         _render_module_settings(T, defaults)
     else:
@@ -2881,6 +2888,8 @@ def _case_chat_send_message(user_msg: str, defaults: dict, messages_key: str) ->
 
     reply: str
     try:
+        from crew_test import chat_with_cases_agent
+
         os.environ["GEMINI_API_KEY"] = defaults.get("gemini_key") or os.environ.get("GEMINI_API_KEY", "")
         os.environ["GEMINI_MODEL"] = defaults.get("gemini_model") or os.environ.get(
             "GEMINI_MODEL", "gemini-2.5-flash-lite"

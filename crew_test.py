@@ -763,7 +763,7 @@ def _parse_markdown_tables_inner(text: str) -> list[list[list[str]]]:
 
 def _extract_case_table_from_reply(content: str) -> str | None:
     """从 Agent 回复中提取 <case_table> 内的 Markdown 表格，供未来一键合入使用。"""
-    m = re.search(r"<case_table>\\s*([\\s\\S]*?)\\s*</case_table>", content or "", re.IGNORECASE)
+    m = re.search(r"<case_table>\s*([\s\S]*?)\s*</case_table>", content or "", re.IGNORECASE)
     if not m:
         return None
     return str(m.group(1) or "").strip() or None
