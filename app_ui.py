@@ -381,6 +381,57 @@ def _load_version() -> dict:
         return {"version": "", "build_time": ""}
 
 
+def _render_memory_history_select(
+    key_prefix: str,
+    label: str,
+    empty_hint: str,
+    project_id: str,
+    limit: int = 20,
+) -> tuple[dict | None, list[dict]]:
+    """渲染一个项目记忆历史下拉框，返回 (selected_entry, entries_list)。"""
+    entries: list[dict] = list_recent(limit=limit, project_id=project_id)
+    if not entries:
+        st.selectbox(
+            label,
+            options=["__EMPTY__"],
+            index=0,
+            disabled=True,
+            label_visibility="collapsed",
+            key=f"{key_prefix}_memory_select_empty",
+        )
+        st.caption(empty_hint)
+        return None, []
+
+    options: list[str] = []
+    for e in entries:
+        created = str(e.get("created_at", "") or "")
+        title = (e.get("title") or e.get("source_id") or "未命名").strip()
+        src_type = str(e.get("source_type", "") or "")
+        options.append(f"[{created}] {title}（{src_type}）")
+
+    state_key = f"{key_prefix}_last_memory_id"
+    last_id = st.session_state.get(state_key)
+    default_index = 0
+    if last_id is not None:
+        for idx, e in enumerate(entries):
+            if e.get("id") == last_id:
+                default_index = idx
+                break
+
+    sel = st.selectbox(
+        label,
+        options=options,
+        index=default_index if options else 0,
+        key=f"{key_prefix}_memory_select",
+    )
+    if sel and sel in options:
+        idx = options.index(sel)
+        selected = entries[idx]
+        st.session_state[state_key] = selected.get("id")
+        return selected, entries
+    return None, entries
+
+
 def _load_workbench_apps(T: dict) -> list[dict]:
     """从 config/workbench_apps.yaml 读取工作台模块列表，仅返回 enabled 且按 order 排序的项。"""
     try:
@@ -1355,9 +1406,11 @@ def _render_paste_mode(T: dict, defaults: dict):
 
 
 def _render_upload_mode(T: dict, defaults: dict):
-    """文件上传模式：上传 .md / .docx（需求文档）+ .xlsx（既有用例）→ 解析 → 四 Agent → 三块结果 + Excel 下载。
+    """文件上传模式：上传 .md / .docx / .xlsx（需求文档或既有用例）→ 解析 → 四 Agent → 三块结果 + Excel 下载。
     仅 Excel 下载，不配置导出路径或 Sheets。"""
-    st.caption("支持 .md / .docx（需求文档）和 .xlsx（既有测试用例），可混合选择。至少需 1 个需求文档。")
+    st.caption(
+        "支持 .md / .docx（需求文档）和 .xlsx（表格 PRD 或既有测试用例），可混合选择。至少需 1 个需求文档。"
+    )
 
     uploaded = st.file_uploader(
         "上传需求文档与既有用例",
@@ -1420,7 +1473,7 @@ def _render_upload_mode(T: dict, defaults: dict):
                 st.caption(f"📊 {name} — {p.get('rows', 0)} 行")
 
     if not demand_md and effective_files:
-        st.warning("至少需上传 1 个需求文档（.md 或 .docx）；或文件类型/大小不符要求。")
+        st.warning("至少需上传 1 个需求文档（.md / .docx / .xlsx）；或文件类型/大小不符要求。")
 
     gemini_models_list, default_model = _load_models()
     _model_opts = [m[0] for m in gemini_models_list]
@@ -1564,19 +1617,15 @@ def _render_module_risk_report(T: dict, defaults: dict):
             label_visibility="collapsed",
         ).strip()
     else:
-        entries = list_recent(limit=20, project_id=_get_current_project())
-        if not entries:
-            st.info(_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档，请先在「项目记忆」页导入。")
-        else:
-            options = [f"{e.get('title', '') or e.get('source_id', '未命名')} ({e.get('created_at', '')})" for e in entries]
-            sel = st.selectbox(
-                _get_text(T, "risk_report.doc_source_memory") or "选择近期文档",
-                options=options,
-                key="risk_report_memory_sel",
-            )
-            if sel and sel in options:
-                idx = options.index(sel)
-                doc_context = (entries[idx].get("content") or entries[idx].get("summary") or "").strip()
+        selected_entry, _ = _render_memory_history_select(
+            key_prefix="risk_report",
+            label=_get_text(T, "risk_report.doc_source_memory") or "选择近期文档",
+            empty_hint=_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档，请先在「项目记忆」页导入。",
+            project_id=_get_current_project(),
+            limit=20,
+        )
+        if selected_entry:
+            doc_context = (selected_entry.get("content") or selected_entry.get("summary") or "").strip()
 
     running_key = _get_module_state_key(MODULE_RISK_REPORT, "running")
     result_key = _get_module_state_key(MODULE_RISK_REPORT, "result")
@@ -1790,6 +1839,16 @@ def _render_module_memory(T: dict, defaults: dict):
         st.divider()
     except ImportError:
         pass
+
+    st.markdown("**最近项目记忆**")
+    _ = _render_memory_history_select(
+        key_prefix="memory_tab",
+        label=_get_text(T, "memory_tab.recent_memory_label") or "选择一条项目记忆记录",
+        empty_hint=_get_text(T, "memory_tab.history_empty")
+        or "当前项目暂无项目记忆记录，请先导入需求文档或全回归用例。",
+        project_id=project_id,
+        limit=20,
+    )
 
     st.markdown("**搜索**")
     kw = st.text_input(

@@ -566,9 +566,14 @@ def _extract_text_from_docx(raw: bytes) -> str:
 
 
 def parse_uploaded_files(uploaded_files: list) -> tuple[str, str, list[dict[str, Any]]]:
-    """解析上传的 .md、.docx（需求文档）与 .xlsx（既有用例）文件，供「文件上传生成用例」使用。
+    """解析上传的 .md、.docx、.xlsx 文件，供「文件上传生成用例」使用。
+
+    - .md / .docx：视为需求文档内容，拼接到 demand_merged；
+    - .xlsx：既作为「既有用例」输入 existing_cases，也将表格内容转为文本追加到 demand_merged，
+      以支持用 Excel 填写 PRD 或表格化需求。
+
     返回 (需求文档合并文本, 既有用例合并文本, 预览信息列表)。
-    需至少 1 个需求文档（.md 或 .docx）；.xlsx 可选。"""
+    需至少 1 个需求文档（.md / .docx / .xlsx）。"""
     demand_parts: list[str] = []
     xlsx_parts: list[str] = []
     preview_infos: list[dict[str, Any]] = []
@@ -602,12 +607,14 @@ def parse_uploaded_files(uploaded_files: list) -> tuple[str, str, list[dict[str,
             text = _extract_text_from_docx(raw)
             demand_parts.append(text)
             preview_infos.append({"name": name, "type": "docx", "preview": (text[:200] + "…") if len(text) > 200 else text})
-        else:  # xlsx
+        else:  # xlsx：兼作「既有用例」与「表格 PRD」双重来源
             from io import BytesIO
             _wrapper = BytesIO(raw)
             _wrapper.name = name  # type: ignore
             content, rows = parse_test_cases_file(_wrapper)
-            xlsx_parts.append(content)
+            if content:
+                xlsx_parts.append(content)
+                demand_parts.append(content)
             preview_infos.append({"name": name, "type": "xlsx", "rows": rows})
 
     demand_merged = "\n\n---\n\n".join(demand_parts) if demand_parts else ""
