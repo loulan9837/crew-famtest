@@ -852,16 +852,35 @@ def chat_with_cases_agent(
     return str(out).strip() if out else ""
 
 
-def _compute_next_id_from_table(table: list[list[str]]) -> str:
-    """从用例表中计算下一个可用用例 ID（按首列，取最后一条非空 ID）。"""
+def _resolve_id_column_index(header: list[str]) -> int:
+    """根据表头确定 ID 列索引。9 列格式通常为用例编号（第 2 列），7 列为首列。"""
+    for i, h in enumerate(header):
+        c = (h or "").strip().lower()
+        if c in ("用例编号", "用例id", "case id", "id"):
+            return i
+    return 0
+
+
+def _get_dedup_key_indices(header: list[str]) -> list[int]:
+    """根据表头列数返回去重 key 的列索引。9 列：主模块(2)、子模块(3)、测试步骤(7)；7 列：模块(1)、测试项(2)、操作步骤(5)。"""
+    n = len(header)
+    if n >= 9:
+        return [2, 3, 7]
+    if n >= 7:
+        return [1, 2, 5]
+    return list(range(min(3, n))) if n else []
+
+
+def _compute_next_id_from_table(table: list[list[str]], id_col: int = 0) -> str:
+    """从用例表中计算下一个可用用例 ID（按 id_col 列，取最后一条非空 ID）。"""
     if not table or len(table) < 2:
         raise ValueError("用例表为空，无法计算下一用例 ID")
     data_rows = table[1:]
     last_id = ""
     for r in data_rows:
-        if not r:
+        if not r or len(r) <= id_col:
             continue
-        cid = str(r[0] or "").strip()
+        cid = str(r[id_col] or "").strip()
         if cid:
             last_id = cid
     if not last_id:
@@ -908,22 +927,14 @@ def generate_incremental_cases(
     base_table = tables[0]
     if len(base_table) < 2:
         return {"ok": False, "error": "基线用例表数据行为空，无法做增量补充", "delta_md": "", "next_id_start": ""}
-    header = [str(c or "").strip() for c in base_table[0]]
-    expected_header = ["ID", "模块", "测试项", "优先级", "前置条件", "操作步骤", "预期结果"]
-    if header != expected_header:
-        return {
-            "ok": False,
-            "error": "基线用例表头不符合规范，预期为：ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果",
-            "delta_md": "",
-            "next_id_start": "",
-        }
+    base_header = [str(c or "").strip() for c in base_table[0]]
+    id_col = _resolve_id_column_index(base_header)
 
     try:
-        next_id = _compute_next_id_from_table(base_table)
+        next_id = _compute_next_id_from_table(base_table, id_col)
     except ValueError as e:
         return {"ok": False, "error": str(e), "delta_md": "", "next_id_start": ""}
 
-    # 构造增量 Agent Prompt：强调只输出 Delta + ID 强约束
     base_cases_preview = base_md[:20000]
     prompt = []
     prompt.append("你是一位资深高级全栈测试开发专家。")
@@ -941,12 +952,13 @@ def generate_incremental_cases(
     prompt.append("=== 现有测试用例表格（基线） ===")
     prompt.append(base_cases_preview)
     prompt.append("")
-    prompt.append("=== 增量指令（仅描述新增/变更部分） ===")
+    prompt.append("=== 增量指令（用户补充需求，自然语言即可，无格式要求） ===")
     prompt.append(instr)
     prompt.append("")
     prompt.append("=== 重要规则（必须严格遵守） ===")
     prompt.append("1. 只输出【增量/Delta】部分，绝对不允许输出任何已经存在的用例！")
-    prompt.append("2. 输出格式必须为 Markdown 表格，表头严格为：| ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果 |。")
+    header_str = " | ".join(base_header)
+    prompt.append(f"2. 输出格式必须为 Markdown 表格，表头严格为：| {header_str} |（列数和列名必须与基线表完全一致）。")
     prompt.append("3. 中英/数字边界不得出现空格，例如：点击Save按钮。英文内部保留原始空格。")
     prompt.append("4. 预期结果绝对去动词化：不得出现“点击”“查看”等动作词，仅描述状态/展示/置灰等；多条预期结果时分行并使用 1. 2. 编号，单条时禁止前置编号。")
     prompt.append("5. 必须显式对比现有测试用例，严禁重复已有场景。")
@@ -994,27 +1006,30 @@ def generate_incremental_cases(
     if len(delta_table) < 2:
         return {"ok": False, "error": "增量用例表数据行为空", "delta_md": "", "next_id_start": ""}
     delta_header = [str(c or "").strip() for c in delta_table[0]]
-    if delta_header != expected_header:
+    if delta_header != base_header:
+        actual_str = " | ".join(delta_header) or "(空)"
+        expected_str = " | ".join(base_header) or "(空)"
         return {
             "ok": False,
-            "error": "增量用例表头不符合规范，预期为：ID | 模块 | 测试项 | 优先级 | 前置条件 | 操作步骤 | 预期结果",
+            "error": f"增量用例表头与基线不一致。实际：{actual_str}；基线：{expected_str}",
             "delta_md": "",
             "next_id_start": "",
         }
 
-    # ID 合法性与冲突校验
-    base_ids = set()
+    base_ids: set[str] = set()
     for r in base_table[1:]:
-        if not r:
+        if not r or len(r) <= id_col:
             continue
-        cid = str(r[0] or "").strip()
+        cid = str(r[id_col] or "").strip()
         if cid:
             base_ids.add(cid)
-    new_ids: list[str] = []
+    new_ids = []
     for r in delta_table[1:]:
         if not r:
             continue
-        cid = str(r[0] or "").strip()
+        if len(r) <= id_col:
+            return {"ok": False, "error": "增量用例中存在空 ID", "delta_md": "", "next_id_start": ""}
+        cid = str(r[id_col] or "").strip()
         if not cid:
             return {"ok": False, "error": "增量用例中存在空 ID", "delta_md": "", "next_id_start": ""}
         new_ids.append(cid)
@@ -1025,7 +1040,6 @@ def generate_incremental_cases(
     if any(i in base_ids for i in new_ids):
         return {"ok": False, "error": "增量用例 ID 与基线用例存在冲突", "delta_md": "", "next_id_start": ""}
 
-    # 检查首条 ID 是否等于 next_id，后续是否逐条递增
     if new_ids[0] != next_id:
         return {"ok": False, "error": f"首条增量用例 ID 必须为 {next_id}，实际为 {new_ids[0]}", "delta_md": "", "next_id_start": ""}
     try:
@@ -1043,12 +1057,14 @@ def generate_incremental_cases(
     except Exception as e:
         return {"ok": False, "error": f"增量用例 ID 序列校验失败：{e}", "delta_md": "", "next_id_start": ""}
 
-    # 粗略重复检测：按 (模块, 测试项, 操作步骤) 与基线比对，避免明显重复场景
+    dedup_indices = _get_dedup_key_indices(base_header)
+
     def _row_key(row: list[str]) -> str:
         vals = [str(v or "").strip() for v in row]
-        while len(vals) < 7:
-            vals.append("")
-        return "|".join([vals[1], vals[2], vals[5]])  # 模块 | 测试项 | 操作步骤
+        parts = []
+        for idx in dedup_indices:
+            parts.append(vals[idx] if idx < len(vals) else "")
+        return "|".join(parts)
 
     base_keys = {_row_key(r) for r in base_table[1:] if r}
     dup_rows = [r for r in delta_table[1:] if r and _row_key(r) in base_keys]
