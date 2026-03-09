@@ -1413,9 +1413,6 @@ def _render_paste_mode(T: dict, defaults: dict):
     # 用例补充（增量生成）
     _render_incremental_section(T, defaults)
 
-    # 用例补充（增量生成）
-    _render_incremental_section(T, defaults)
-
 
 def _render_upload_mode(T: dict, defaults: dict):
     """文件上传模式：上传 .md / .docx / .xlsx（需求文档或既有用例）→ 解析 → 四 Agent → 三块结果 + Excel 下载。
