@@ -1,6 +1,6 @@
 # UI 与产品设计偏差对照与修正
 
-> 依据：`implementation-handoff-for-programming.md`、`product-redesign-2026.md`、`ui-architecture-spec.md`
+> 依据：`implementation-handoff-for-programming.md`、`ui-architecture-spec.md`
 
 ---
 
