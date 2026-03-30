@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from crewai import Agent, Task, Crew
+from crewai.llm import LLM as CrewAILLM
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 try:
@@ -56,14 +57,39 @@ def _resolve_gemini_model(model: str) -> str:
     return _DEPRECATED_GEMINI_MODEL_MAP.get(m, m or "gemini-2.5-flash-lite")
 
 
+def _build_crew_agent_llm(
+    model_name: str,
+    gemini_api_key: str,
+    cached_content_name: str = "",
+    temperature: float = 0.4,
+) -> Any:
+    """构建供 CrewAI Agent 使用的 LLM（Crew 原生 Gemini，继承 BaseLLM）。
+
+    勿将 LangChain 的 ChatGoogleGenerativeAI（BaseChatModel）传给 Agent，否则会触发
+    Pydantic 对 llm 字段的校验错误（str / BaseLLM 均不匹配）。
+    Crew 原生 Gemini 暂不支持 LangChain 式 cached_content，上下文缓存由上层另行处理。
+    """
+    model = _resolve_gemini_model(model_name)
+    kwargs: dict[str, Any] = {
+        "model": f"gemini/{model}",
+        "temperature": temperature,
+    }
+    key = (gemini_api_key or "").strip()
+    if key:
+        kwargs["api_key"] = key
+    _ = cached_content_name  # 保留参数与调用方签名一致，避免静默依赖缓存
+    return CrewAILLM(**kwargs)
+
+
 def _build_gemini_llm(
     model_name: str,
     gemini_api_key: str,
     cached_content_name: str = "",
 ) -> ChatGoogleGenerativeAI:
-    """构建 Gemini LLM；若 SDK 支持则挂载 cached_content。"""
+    """构建 LangChain Gemini，用于 invoke() 直连调用（非 Crew Agent）。"""
+    model = _resolve_gemini_model(model_name)
     base_kwargs = {
-        "model": model_name,
+        "model": model,
         "google_api_key": gemini_api_key,
         "temperature": 0.4,
     }
@@ -217,7 +243,7 @@ def _run_crew_sequential(
         )
     except ImportError:
         cached_content_name = ""
-    llm = _build_gemini_llm(model_name, gemini_api_key, cached_content_name)
+    llm = _build_crew_agent_llm(model_name, gemini_api_key, cached_content_name)
     tasks_cfg = config.get("tasks") or []
     if not tasks_cfg:
         return "", []
@@ -412,7 +438,7 @@ def _get_crew_with_config(
         )
     except ImportError:
         cached_content_name = ""
-    llm = _build_gemini_llm(model_name, gemini_api_key, cached_content_name)
+    llm = _build_crew_agent_llm(model_name, gemini_api_key, cached_content_name)
     return _build_crew_from_config(agents_config, llm, project_context, stream=stream)
 
 
@@ -437,7 +463,7 @@ def chat_with_document_agent(
         raise ValueError("GEMINI_API_KEY 未设置，请先配置。")
 
     model_name = _resolve_gemini_model(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
-    llm = _build_gemini_llm(model_name, gemini_api_key)
+    llm = _build_crew_agent_llm(model_name, gemini_api_key)
 
     config = load_agents_config(agents_config_path or AGENTS_CONFIG_PATH)
     agents_cfg = config.get("agents") or []
@@ -785,7 +811,7 @@ def chat_with_cases_agent(
         raise ValueError("GEMINI_API_KEY 未设置，请先在「设置」中配置。")
 
     model_name = _resolve_gemini_model(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
-    llm = _build_gemini_llm(model_name, gemini_api_key)
+    llm = _build_crew_agent_llm(model_name, gemini_api_key)
 
     def _build_case_chat_prompt() -> str:
         parts: list[str] = []

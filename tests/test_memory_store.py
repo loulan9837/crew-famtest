@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import threading
 
 import pytest
 
@@ -18,8 +19,28 @@ _orig_db = ms.MEMORY_DB_PATH
 ms.MEMORY_DB_PATH = TEST_DB
 
 
+def _reset_sqlite_backend_connections() -> None:
+    """丢弃 SqliteBackend 上可能指向已删文件的线程内连接。
+
+    全量跑 pytest 时，test_dual_project_isolation 会删除临时目录；若主线程仍复用旧
+    sqlite 连接，后续本模块写入会报 disk I/O error。
+    """
+    b = getattr(ms, "_backend", None)
+    if b is None or not hasattr(b, "_local"):
+        return
+    conn = getattr(b._local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    b._local = threading.local()
+    b._tables_ready = False
+
+
 def setup_module():
-    """测试前清理可能存在的旧测试库"""
+    """测试前清理可能存在的旧测试库并重置后端连接"""
+    _reset_sqlite_backend_connections()
     if os.path.isfile(TEST_DB):
         os.remove(TEST_DB)
 
@@ -29,6 +50,7 @@ def teardown_module():
     if os.path.isfile(TEST_DB):
         os.remove(TEST_DB)
     ms.MEMORY_DB_PATH = _orig_db
+    _reset_sqlite_backend_connections()
 
 
 def test_add_entry():

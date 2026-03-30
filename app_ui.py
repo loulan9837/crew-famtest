@@ -466,6 +466,48 @@ def _get_module_state_key(module_id: str, suffix: str) -> str:
     return f"app_{module_id}_{suffix}"
 
 
+def _persist_ui_key(widget_key: str) -> str:
+    """与 widget 的 session_state key 对应的持久化备份键。
+
+    切换侧栏模块时，本页未渲染的 widget 可能被 Streamlit 从 session_state 中移除；
+    将用户输入同步到 persist_ui_*，返回时再写回 widget key，实现「全站」保留输入。
+    """
+    return f"persist_ui_{widget_key}"
+
+
+def _restore_widget_state(widget_key: str, default=None) -> None:
+    """从 persist 恢复 widget 的 session_state，便于再次进入页面时回填。"""
+    pk = _persist_ui_key(widget_key)
+    if pk in st.session_state:
+        st.session_state[widget_key] = st.session_state[pk]
+    elif default is not None and widget_key not in st.session_state:
+        st.session_state[widget_key] = default
+
+
+def _persist_widget_state(widget_key: str) -> None:
+    """将当前 widget 值写入 persist（供 on_change 或模块末尾批量调用）。"""
+    pk = _persist_ui_key(widget_key)
+    if widget_key in st.session_state:
+        st.session_state[pk] = st.session_state[widget_key]
+
+
+def _make_persist_callback(widget_key: str):
+    def _cb() -> None:
+        _persist_widget_state(widget_key)
+
+    return _cb
+
+
+def _init_settings_persist_from_defaults(defaults: dict) -> None:
+    """设置页：首次进入时用 defaults 初始化 persist，避免仅依赖 value= 导致切换页面后丢失未保存输入。"""
+    pk_k = _persist_ui_key("settings_gemini_key")
+    pk_m = _persist_ui_key("settings_gemini_model")
+    if pk_k not in st.session_state:
+        st.session_state[pk_k] = (defaults.get("gemini_key") or "") or ""
+    if pk_m not in st.session_state:
+        st.session_state[pk_m] = (defaults.get("gemini_model") or "") or ""
+
+
 def _parse_cases_md_to_rows(cases_md: str) -> list[list[str]]:
     """将 Markdown 用例表解析为行列表（含表头），无表或解析失败返回空列表。"""
     if not (cases_md or "").strip():
@@ -663,11 +705,15 @@ def _render_incremental_section(T: dict, defaults: dict) -> None:
     )
 
     last_instr = st.session_state.get("incremental_last_instruction", "")
+    _pk_inc = _persist_ui_key("incremental_instruction")
+    if _pk_inc not in st.session_state and last_instr:
+        st.session_state[_pk_inc] = last_instr
+    _restore_widget_state("incremental_instruction", "")
     instruction = st.text_area(
         "补充说明/变更描述",
-        value=last_instr,
         height=120,
         key="incremental_instruction",
+        on_change=_make_persist_callback("incremental_instruction"),
     ).strip()
 
     last_err = st.session_state.get("incremental_last_error", "")
@@ -678,6 +724,7 @@ def _render_incremental_section(T: dict, defaults: dict) -> None:
     with col_gen:
         if st.button("生成补充用例", key="incremental_generate"):
             st.session_state["incremental_last_instruction"] = instruction
+            _persist_widget_state("incremental_instruction")
             out = generate_incremental_cases(
                 prd_text=prd_text,
                 base_cases_md=cases_md,
@@ -1131,6 +1178,7 @@ def _render_module_run(T: dict, defaults: dict):
     st.caption(_get_text(T, "run_tab.page_caption") or "从需求文档生成测试用例，支持上传或粘贴，导出 Excel。")
     st.markdown("<div style='margin-bottom:0.5rem'></div>", unsafe_allow_html=True)
 
+    _restore_widget_state("run_demand_source", "upload")
     demand_source = st.radio(
         "需求来源",
         options=["upload", "paste"],
@@ -1140,6 +1188,7 @@ def _render_module_run(T: dict, defaults: dict):
         }.get(x, x),
         key="run_demand_source",
         horizontal=True,
+        on_change=_make_persist_callback("run_demand_source"),
     )
 
     # F5-2 配置状态提示
@@ -1161,11 +1210,13 @@ def _render_run_history(T: dict) -> None:
     st.subheader(_get_text(T, "run_tab.history_section") or "历史记录")
 
     _delete_confirm_key = _get_module_state_key(MODULE_RUN, "delete_confirm_id")
+    _restore_widget_state("run_history_filter", "")
     keyword = st.text_input(
         "搜索",
         key="run_history_filter",
         placeholder=_get_text(T, "run_tab.history_filter_placeholder") or "按标题或来源类型搜索…",
         label_visibility="collapsed",
+        on_change=_make_persist_callback("run_history_filter"),
     )
     keyword = (keyword or "").strip()
 
@@ -1240,20 +1291,24 @@ def _render_paste_mode(T: dict, defaults: dict):
     """粘贴文本模式：大文本框粘贴 PRD，可选 .xlsx 既有用例，跑四 Agent。"""
     st.caption(_get_text(T, "run_tab.paste_xlsx_hint") or "可同时上传 .xlsx 作为既有用例上下文（可选）")
 
+    _restore_widget_state("run_paste_content", "")
     pasted = st.text_area(
         "PRD 内容",
         height=220,
         key="run_paste_content",
         placeholder=_get_text(T, "run_tab.paste_placeholder") or "在此粘贴 PRD 或需求文档内容…",
         label_visibility="collapsed",
+        on_change=_make_persist_callback("run_paste_content"),
     ).strip()
 
+    _restore_widget_state("run_paste_xlsx", None)
     xlsx_uploaded = st.file_uploader(
         "可选：上传 .xlsx 既有用例",
         type=["xlsx"],
         accept_multiple_files=False,
         key="run_paste_xlsx",
         help="可选；上传后作为 Agent 上下文",
+        on_change=_make_persist_callback("run_paste_xlsx"),
     )
 
     # 缓存粘贴模式下上传的 xlsx，切换 Tab / 模式后仍保留
@@ -1301,12 +1356,14 @@ def _render_paste_mode(T: dict, defaults: dict):
         0,
     )
     with st.expander("模型配置", expanded=not bool(defaults.get("gemini_key"))):
+        _restore_widget_state("run_paste_model")
         gemini_model = st.selectbox(
             "Gemini 模型",
             options=_model_opts,
             index=_model_idx,
             format_func=lambda x: dict(gemini_models_list).get(x, x),
             key="run_paste_model",
+            on_change=_make_persist_callback("run_paste_model"),
         )
 
     pipeline_running = st.session_state.get(_paste_key, False)
@@ -1421,12 +1478,14 @@ def _render_upload_mode(T: dict, defaults: dict):
         "支持 .md / .docx（需求文档）和 .xlsx（表格 PRD 或既有测试用例），可混合选择。至少需 1 个需求文档。"
     )
 
+    _restore_widget_state("run_upload_files", None)
     uploaded = st.file_uploader(
         "上传需求文档与既有用例",
         type=["md", "docx", "xlsx"],
         accept_multiple_files=True,
         key="run_upload_files",
         help="支持 .md、.docx（Word）、.xlsx，可混合选择；单文件 &lt; 10MB，总 &lt; 50MB",
+        on_change=_make_persist_callback("run_upload_files"),
     )
 
     # 将上传文件缓存到 session_state，切换 Tab 或 demand_source 后仍可使用
@@ -1488,12 +1547,14 @@ def _render_upload_mode(T: dict, defaults: dict):
     _model_opts = [m[0] for m in gemini_models_list]
     _model_idx = next((i for i, (k, _) in enumerate(gemini_models_list) if k == (defaults.get("gemini_model") or default_model)), 0)
     with st.expander("模型配置", expanded=not bool(defaults.get("gemini_key"))):
+        _restore_widget_state("run_upload_model")
         gemini_model = st.selectbox(
             "Gemini 模型",
             options=_model_opts,
             index=_model_idx,
             format_func=lambda x: dict(gemini_models_list).get(x, x),
             key="run_upload_model",
+            on_change=_make_persist_callback("run_upload_model"),
         )
     st.caption("仅支持 Excel 下载，不配置导出路径。")
 
@@ -1607,6 +1668,7 @@ def _render_module_risk_report(T: dict, defaults: dict):
     st.caption(_get_text(T, "risk_report.section_desc") or "单独对文档做风险评估，产出表格报告，不参与四 Agent 流程。")
 
     source_options = ["paste", "memory"] if MEMORY_AVAILABLE else ["paste"]
+    _restore_widget_state("risk_report_doc_source", "paste")
     doc_source = st.radio(
         _get_text(T, "risk_report.doc_source") or "文档来源",
         options=source_options,
@@ -1615,15 +1677,18 @@ def _render_module_risk_report(T: dict, defaults: dict):
             "memory": _get_text(T, "risk_report.doc_source_memory") or "项目记忆（选择近期文档）",
         }[x],
         key="risk_report_doc_source",
+        on_change=_make_persist_callback("risk_report_doc_source"),
     )
 
     doc_context = ""
     if doc_source == "paste":
+        _restore_widget_state("risk_report_paste", "")
         doc_context = st.text_area(
             _get_text(T, "chat_tab.paste_placeholder") or "粘贴需求文档内容",
             height=180,
             key="risk_report_paste",
             label_visibility="collapsed",
+            on_change=_make_persist_callback("risk_report_paste"),
         ).strip()
     else:
         selected_entry, _ = _render_memory_history_select(
@@ -1722,7 +1787,14 @@ def _render_module_agents(T: dict):
     config = load_agents_config()
     if not config:
         st.warning("未找到 config/agents.yaml 或 PyYAML 未安装；可在此编辑并保存。")
-        raw_yaml = st.text_area("agents.yaml 内容", height=400, placeholder="agents:\n  - id: ...\n    role: ...\n    goal: ...\n    backstory: |\n      ...", key="agents_raw_yaml")
+        _restore_widget_state("agents_raw_yaml", "")
+        raw_yaml = st.text_area(
+            "agents.yaml 内容",
+            height=400,
+            placeholder="agents:\n  - id: ...\n    role: ...\n    goal: ...\n    backstory: |\n      ...",
+            key="agents_raw_yaml",
+            on_change=_make_persist_callback("agents_raw_yaml"),
+        )
         if st.button("保存 agents.yaml", key="agents_save_raw"):
             if raw_yaml.strip():
                 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -1733,6 +1805,12 @@ def _render_module_agents(T: dict):
     else:
         agents = config.get("agents") or []
         tasks = config.get("tasks") or []
+        for i in range(len(agents)):
+            for wk in (f"agent_id_{i}", f"agent_role_{i}", f"agent_goal_{i}", f"agent_back_{i}"):
+                _restore_widget_state(wk)
+        for i in range(len(tasks)):
+            for wk in (f"task_id_{i}", f"task_agent_{i}", f"task_desc_{i}", f"task_out_{i}"):
+                _restore_widget_state(wk)
         st.markdown("**Agent（角色）**")
         for i, a in enumerate(agents):
             with st.expander(f"Agent {i + 1}/{len(agents)}: {a.get('role', a.get('id', '未命名'))}", expanded=False):
@@ -1788,6 +1866,14 @@ def _render_module_agents(T: dict):
                         (_get_text(T, "agents_tab.save_fail_io") or "保存失败：无法写入配置文件，请检查磁盘权限或稍后重试")
                         + f"（{e}）"
                     )
+
+        for i in range(len(agents)):
+            for wk in (f"agent_id_{i}", f"agent_role_{i}", f"agent_goal_{i}", f"agent_back_{i}"):
+                _persist_widget_state(wk)
+        for i in range(len(tasks)):
+            for wk in (f"task_id_{i}", f"task_agent_{i}", f"task_desc_{i}", f"task_out_{i}"):
+                _persist_widget_state(wk)
+
 
 def _render_module_memory(T: dict, defaults: dict):
     """工作台模块：项目记忆。"""
@@ -1860,11 +1946,13 @@ def _render_module_memory(T: dict, defaults: dict):
     )
 
     st.markdown("**搜索**")
+    _restore_widget_state("mem_search", "")
     kw = st.text_input(
         _get_text(T, "memory_tab.search_label") or "搜索",
         placeholder=_get_text(T, "memory_tab.search_placeholder") or "输入关键词（如：直播、禁言、AB test）",
         key="mem_search",
         label_visibility="collapsed",
+        on_change=_make_persist_callback("mem_search"),
     )
     entries = search(kw, limit=20, project_id=project_id) if kw and kw.strip() else []
     if entries:
@@ -1963,18 +2051,22 @@ def _render_module_memory(T: dict, defaults: dict):
 
     st.divider()
     st.markdown("**导入需求**")
+    _restore_widget_state("mem_demand_paste", "")
     demand_paste = st.text_area(
         _get_text(T, "memory_tab.demand_paste_label") or "粘贴需求文档内容",
         placeholder=_get_text(T, "memory_tab.demand_paste_placeholder") or "在此粘贴 PRD 或需求文档…",
         height=120,
         key="mem_demand_paste",
         label_visibility="collapsed",
+        on_change=_make_persist_callback("mem_demand_paste"),
     )
+    _restore_widget_state("mem_demand_title", "")
     demand_title_input = st.text_input(
         _get_text(T, "memory_tab.demand_title_label") or "标题（可选）",
         placeholder="如：直播分辨率 AB test 需求",
         key="mem_demand_title",
         label_visibility="collapsed",
+        on_change=_make_persist_callback("mem_demand_title"),
     )
     if st.button(_get_text(T, "memory_tab.import_demand_btn") or "导入需求", key="mem_import_demand"):
         if demand_paste and demand_paste.strip():
@@ -2018,6 +2110,7 @@ def _render_module_memory(T: dict, defaults: dict):
     try:
         from app_ui_components import render_file_uploader
 
+        _restore_widget_state("test_cases_upload", None)
         test_cases_upload_result = render_file_uploader(
             accepted_types=["xlsx", "xls", "csv", "txt"],
             key="test_cases_upload",
@@ -2025,11 +2118,13 @@ def _render_module_memory(T: dict, defaults: dict):
         )
         test_cases_file = test_cases_upload_result["file"] if test_cases_upload_result else None
     except ImportError:
+        _restore_widget_state("test_cases_upload", None)
         test_cases_file = st.file_uploader(
             _get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
             type=["xlsx", "xls", "csv", "txt"],
             key="test_cases_upload",
             label_visibility="collapsed",
+            on_change=_make_persist_callback("test_cases_upload"),
         )
 
     # 缓存测试用例上传文件，切换 Tab 后仍可使用
@@ -2042,12 +2137,14 @@ def _render_module_memory(T: dict, defaults: dict):
         except Exception:
             pass
 
+    _restore_widget_state("test_cases_paste", "")
     test_cases_paste = st.text_area(
         _get_text(T, "memory_tab.test_cases_paste_placeholder") or "或粘贴内容",
         placeholder=_get_text(T, "memory_tab.test_cases_paste_placeholder") or "表格（| 分隔）或纯文本",
         key="test_cases_paste",
         height=100,
         label_visibility="collapsed",
+        on_change=_make_persist_callback("test_cases_paste"),
     )
     if st.button(_get_text(T, "memory_tab.test_cases_import_btn") or "导入测试用例", key="mem_import_test_cases"):
         # 始终优先使用缓存中的原始字节，避免二次 read 导致游标在 EOF 位置
@@ -2523,6 +2620,8 @@ def _render_module_chat(T: dict, defaults: dict):
     st.caption(_get_text(T, "chat_tab.section_desc") or "Agent 可理解全部需求文档。选择项目整体记忆或手动粘贴文档内容。")
 
     chat_options = ["memory", "paste"] if MEMORY_AVAILABLE else ["paste"]
+    _def_chat = "memory" if MEMORY_AVAILABLE else "paste"
+    _restore_widget_state("chat_doc_source", _def_chat)
     doc_source = st.radio(
         _get_text(T, "chat_tab.doc_source_label") or "文档来源",
         options=chat_options,
@@ -2531,6 +2630,7 @@ def _render_module_chat(T: dict, defaults: dict):
             "paste": _get_text(T, "chat_tab.doc_source_paste") or "手动粘贴文档内容",
         }[x],
         key="chat_doc_source",
+        on_change=_make_persist_callback("chat_doc_source"),
     )
     doc_context = ""
     if doc_source == "memory":
@@ -2550,10 +2650,12 @@ def _render_module_chat(T: dict, defaults: dict):
                 if not doc_context:
                     st.info(_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档。请先在「项目记忆」页导入。")
     else:
+        _restore_widget_state("chat_paste_doc", "")
         doc_context = st.text_area(
             _get_text(T, "chat_tab.paste_placeholder") or "在此粘贴需求文档内容",
             height=150,
             key="chat_paste_doc",
+            on_change=_make_persist_callback("chat_paste_doc"),
         ).strip()
 
     if "app_doc_chat_messages" not in st.session_state:
@@ -2916,18 +3018,22 @@ def _render_module_settings(T: dict, defaults: dict):
         st.session_state["current_page"] = MODULE_RUN
         st.rerun()
     st.caption("配置 API 凭证与模型，保存后生成用例时将自动使用。")
+    _init_settings_persist_from_defaults(defaults)
     with st.container():
+        _restore_widget_state("settings_gemini_key")
         gemini_key = st.text_input(
             _get_text(T, "run_tab.gemini_key_label") or "Gemini API Key",
             value=defaults.get("gemini_key", ""), type="password",
             help=_get_text(T, "run_tab.gemini_key_help") or "用于驱动四个 Agent 生成用例",
             key="settings_gemini_key",
+            on_change=_make_persist_callback("settings_gemini_key"),
         )
         gemini_models_list, default_model = _load_models()
         _model_opts = [m[0] for m in gemini_models_list]
         _model_idx = next((i for i, (k, _) in enumerate(gemini_models_list) if k == (defaults.get("gemini_model") or default_model)), 0)
         _model_col, _quota_col = st.columns([3, 1])
         with _model_col:
+            _restore_widget_state("settings_gemini_model")
             gemini_model = st.selectbox(
                 _get_text(T, "run_tab.gemini_model_label") or "Gemini 模型",
                 options=_model_opts,
@@ -2935,6 +3041,7 @@ def _render_module_settings(T: dict, defaults: dict):
                 format_func=lambda x: dict(gemini_models_list).get(x, x),
                 help=_get_text(T, "run_tab.gemini_model_help") or "免费推荐：2.5 Flash-Lite；高质量：2.5 Flash。",
                 key="settings_gemini_model",
+                on_change=_make_persist_callback("settings_gemini_model"),
             )
         with _quota_col:
             _quota_url = _get_text(T, "run_tab.gemini_quota_url") or "https://aistudio.google.com/rate-limit"
