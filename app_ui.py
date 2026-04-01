@@ -138,6 +138,39 @@ def _get_project_display_name(project_id: str) -> str:
     return pid
 
 
+def _get_persist_key(widget_key: str, project_scoped: bool = True) -> str:
+    """生成跨页面保留输入用的 persist key。
+
+    - project_scoped=True 时，以 current_project 为命名空间，避免多项目串草稿；
+    - False 则按全局草稿处理（如设置页非敏感字段）。
+    """
+    prefix = "persist_ui"
+    if project_scoped:
+        pid = _get_current_project()
+        return f"{prefix}_{pid}_{widget_key}"
+    return f"{prefix}_{widget_key}"
+
+
+def _restore_widget_state(widget_key: str, project_scoped: bool = True) -> None:
+    """在创建 widget 之前，将 persist_ui_* 中的草稿写回 widget_key。"""
+    pkey = _get_persist_key(widget_key, project_scoped=project_scoped)
+    if pkey in st.session_state and widget_key not in st.session_state:
+        st.session_state[widget_key] = st.session_state[pkey]
+
+
+def _persist_widget_state(widget_key: str, project_scoped: bool = True) -> None:
+    """将当前 widget 值写入 persist_ui_* 作为页面切换草稿。"""
+    pkey = _get_persist_key(widget_key, project_scoped=project_scoped)
+    if widget_key in st.session_state:
+        st.session_state[pkey] = st.session_state[widget_key]
+
+
+def _clear_persist_widget_state(widget_key: str, project_scoped: bool = True) -> None:
+    """清除指定 widget 的 persist 草稿（用于用户主动清空时）。"""
+    pkey = _get_persist_key(widget_key, project_scoped=project_scoped)
+    st.session_state.pop(pkey, None)
+
+
 def _has_unsaved_project_state() -> bool:
     """粗粒度检测当前项目下是否存在未保存的用户输入，用于项目切换前确认。"""
     s = st.session_state
