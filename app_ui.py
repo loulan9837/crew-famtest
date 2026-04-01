@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from typing import Any
 
 import streamlit as st
 
@@ -151,11 +152,17 @@ def _get_persist_key(widget_key: str, project_scoped: bool = True) -> str:
     return f"{prefix}_{widget_key}"
 
 
-def _restore_widget_state(widget_key: str, project_scoped: bool = True) -> None:
+def _restore_widget_state(
+    widget_key: str,
+    default: Any | None = None,
+    project_scoped: bool = True,
+) -> None:
     """在创建 widget 之前，将 persist_ui_* 中的草稿写回 widget_key。"""
     pkey = _get_persist_key(widget_key, project_scoped=project_scoped)
-    if pkey in st.session_state and widget_key not in st.session_state:
+    if pkey in st.session_state:
         st.session_state[widget_key] = st.session_state[pkey]
+    elif default is not None and widget_key not in st.session_state:
+        st.session_state[widget_key] = default
 
 
 def _persist_widget_state(widget_key: str, project_scoped: bool = True) -> None:
@@ -169,6 +176,13 @@ def _clear_persist_widget_state(widget_key: str, project_scoped: bool = True) ->
     """清除指定 widget 的 persist 草稿（用于用户主动清空时）。"""
     pkey = _get_persist_key(widget_key, project_scoped=project_scoped)
     st.session_state.pop(pkey, None)
+
+
+def _make_persist_callback(widget_key: str, project_scoped: bool = True):
+    def _cb() -> None:
+        _persist_widget_state(widget_key, project_scoped=project_scoped)
+
+    return _cb
 
 
 def _has_unsaved_project_state() -> bool:
@@ -499,46 +513,11 @@ def _get_module_state_key(module_id: str, suffix: str) -> str:
     return f"app_{module_id}_{suffix}"
 
 
-def _persist_ui_key(widget_key: str) -> str:
-    """与 widget 的 session_state key 对应的持久化备份键。
-
-    切换侧栏模块时，本页未渲染的 widget 可能被 Streamlit 从 session_state 中移除；
-    将用户输入同步到 persist_ui_*，返回时再写回 widget key，实现「全站」保留输入。
-    """
-    return f"persist_ui_{widget_key}"
-
-
-def _restore_widget_state(widget_key: str, default=None) -> None:
-    """从 persist 恢复 widget 的 session_state，便于再次进入页面时回填。"""
-    pk = _persist_ui_key(widget_key)
-    if pk in st.session_state:
-        st.session_state[widget_key] = st.session_state[pk]
-    elif default is not None and widget_key not in st.session_state:
-        st.session_state[widget_key] = default
-
-
-def _persist_widget_state(widget_key: str) -> None:
-    """将当前 widget 值写入 persist（供 on_change 或模块末尾批量调用）。"""
-    pk = _persist_ui_key(widget_key)
-    if widget_key in st.session_state:
-        st.session_state[pk] = st.session_state[widget_key]
-
-
-def _make_persist_callback(widget_key: str):
-    def _cb() -> None:
-        _persist_widget_state(widget_key)
-
-    return _cb
-
-
 def _init_settings_persist_from_defaults(defaults: dict) -> None:
-    """设置页：首次进入时用 defaults 初始化 persist，避免仅依赖 value= 导致切换页面后丢失未保存输入。"""
-    pk_k = _persist_ui_key("settings_gemini_key")
-    pk_m = _persist_ui_key("settings_gemini_model")
-    if pk_k not in st.session_state:
-        st.session_state[pk_k] = (defaults.get("gemini_key") or "") or ""
-    if pk_m not in st.session_state:
-        st.session_state[pk_m] = (defaults.get("gemini_model") or "") or ""
+    """设置页：仅初始化非敏感字段的 persist 草稿。"""
+    p_model = _get_persist_key("settings_gemini_model", project_scoped=False)
+    if p_model not in st.session_state:
+        st.session_state[p_model] = (defaults.get("gemini_model") or "") or ""
 
 
 def _parse_cases_md_to_rows(cases_md: str) -> list[list[str]]:
@@ -1363,6 +1342,9 @@ def _render_paste_mode(T: dict, defaults: dict):
         st.session_state["run_paste_content"] = ""
         st.session_state["run_paste_xlsx"] = None
         st.session_state.pop(xlsx_cache_key, None)
+        _clear_persist_widget_state("run_paste_content", project_scoped=True)
+        _clear_persist_widget_state("run_paste_xlsx", project_scoped=True)
+        _clear_persist_widget_state("run_paste_model", project_scoped=True)
         st.session_state[_paste_result_key] = None
         st.session_state[_paste_error_key] = None
         st.rerun()
@@ -1549,6 +1531,8 @@ def _render_upload_mode(T: dict, defaults: dict):
         st.session_state[_upload_result_key] = None
         st.session_state[_upload_error_key] = None
         st.session_state.pop("run_upload_files_cache", None)
+        _clear_persist_widget_state("run_upload_files", project_scoped=True)
+        _clear_persist_widget_state("run_upload_model", project_scoped=True)
         st.rerun()
 
     demand_md = ""
@@ -2607,6 +2591,10 @@ def _render_module_memory(T: dict, defaults: dict):
                         st.markdown(content[:2000] + ("…" if len(content) > 2000 else ""))
     with st.expander(_get_text(T, "memory_tab.memory_summary_section") or "项目记忆摘要（高级）", expanded=False):
         mem = load_project_memory(project_id=project_id)
+        st.caption(
+            _get_text(T, "memory_tab.unsaved_draft_hint")
+            or "当前内容可能为未保存草稿，如需写入项目记忆请点击保存摘要。"
+        )
         new_mem = st.text_area(
             _get_text(T, "memory_tab.memory_text_label") or "内容",
             value=mem, height=180, key="project_memory_text",
@@ -2925,6 +2913,9 @@ def _render_module_case_chat(T: dict, defaults: dict) -> None:
             st.session_state[_key("messages")] = []
             st.session_state[_key("prd_context")] = ""
             st.session_state[_key("cases_context")] = ""
+            _clear_persist_widget_state("case_chat_source_mode", project_scoped=True)
+            _clear_persist_widget_state("case_chat_paste_prd", project_scoped=True)
+            _clear_persist_widget_state("case_chat_paste_cases", project_scoped=True)
             st.rerun()
 
     # 对话消息流与输入
@@ -3052,21 +3043,20 @@ def _render_module_settings(T: dict, defaults: dict):
         st.rerun()
     st.caption("配置 API 凭证与模型，保存后生成用例时将自动使用。")
     _init_settings_persist_from_defaults(defaults)
+    st.caption(_get_text(T, "settings_tab.unsaved_draft_hint") or "当前模型为未保存草稿，点击保存后才会写入本地。")
     with st.container():
-        _restore_widget_state("settings_gemini_key")
         gemini_key = st.text_input(
             _get_text(T, "run_tab.gemini_key_label") or "Gemini API Key",
             value=defaults.get("gemini_key", ""), type="password",
             help=_get_text(T, "run_tab.gemini_key_help") or "用于驱动四个 Agent 生成用例",
             key="settings_gemini_key",
-            on_change=_make_persist_callback("settings_gemini_key"),
         )
         gemini_models_list, default_model = _load_models()
         _model_opts = [m[0] for m in gemini_models_list]
         _model_idx = next((i for i, (k, _) in enumerate(gemini_models_list) if k == (defaults.get("gemini_model") or default_model)), 0)
         _model_col, _quota_col = st.columns([3, 1])
         with _model_col:
-            _restore_widget_state("settings_gemini_model")
+            _restore_widget_state("settings_gemini_model", project_scoped=False)
             gemini_model = st.selectbox(
                 _get_text(T, "run_tab.gemini_model_label") or "Gemini 模型",
                 options=_model_opts,
@@ -3074,7 +3064,7 @@ def _render_module_settings(T: dict, defaults: dict):
                 format_func=lambda x: dict(gemini_models_list).get(x, x),
                 help=_get_text(T, "run_tab.gemini_model_help") or "免费推荐：2.5 Flash-Lite；高质量：2.5 Flash。",
                 key="settings_gemini_model",
-                on_change=_make_persist_callback("settings_gemini_model"),
+                on_change=_make_persist_callback("settings_gemini_model", project_scoped=False),
             )
         with _quota_col:
             _quota_url = _get_text(T, "run_tab.gemini_quota_url") or "https://aistudio.google.com/rate-limit"

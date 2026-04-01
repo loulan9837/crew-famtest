@@ -32,6 +32,9 @@ app:
   try_example: "试试示例"
   back_btn: "← 返回"
 
+settings_tab:
+  unsaved_draft_hint: "当前模型为未保存草稿，点击保存后才会写入本地。"
+
 tabs:
   run: "生成用例"
   agents: "编辑 Agent"
@@ -124,6 +127,7 @@ memory_tab:
   test_cases_paste_placeholder: "或粘贴测试用例内容（表格 | 分隔、纯文本）"
   test_cases_import_btn: "导入测试用例"
   memory_summary_section: "项目记忆摘要（高级）"
+  unsaved_draft_hint: "当前内容可能为未保存草稿，如需写入项目记忆请点击保存摘要。"
   memory_text_label: "内容"
   import_spinner_file: "解析文件中…"
   file_empty: "文件内容为空"
