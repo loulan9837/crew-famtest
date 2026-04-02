@@ -3,12 +3,17 @@
 import io
 import zipfile
 
-from design_import_service import build_candidates, normalize_ext
+from design_import_service import build_candidates, format_size_cap, normalize_ext
 
 
 def test_normalize_ext():
     assert normalize_ext("a.PNG") == "png"
     assert normalize_ext("x.zip") == "zip"
+
+
+def test_format_size_cap():
+    assert format_size_cap(1024 * 1024 * 1024) == "1GB"
+    assert format_size_cap(30 * 1024 * 1024) == "30MB"
 
 
 def test_build_candidates_single_png():

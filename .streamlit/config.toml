@@ -2,7 +2,8 @@
 [server]
 port = 8501
 headless = true
-maxUploadSize = 500
+# 设计图等上传需与 design_import_service.MAX_BATCH_BYTES（1GB）一致；默认 200 会在服务端直接拒收大文件
+maxUploadSize = 1024
 
 [browser]
 gatherUsageStats = false

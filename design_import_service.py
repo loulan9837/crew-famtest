@@ -12,8 +12,18 @@ SUPPORTED_EXTS = {"png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"}
 ZIP_EXT = "zip"
 MAX_BATCH_BYTES = 1024 * 1024 * 1024  # 1GB（解压后合计）
 MAX_FILES_PER_ZIP = 500
-# 与 app_ui 单图上限对齐，防止 ZIP 内超大文件撑爆内存
-MAX_SINGLE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024
+# 单文件上限与批次一致（单个大图/ZIP 内单成员可达 1GB；总批次仍受 MAX_BATCH_BYTES 约束）
+MAX_SINGLE_UNCOMPRESSED_BYTES = MAX_BATCH_BYTES
+
+
+def format_size_cap(n: int) -> str:
+    """将字节上限格式化为文案（如 1GB、30MB）。"""
+    if n <= 0:
+        return "0"
+    if n % (1024 * 1024 * 1024) == 0:
+        return f"{n // (1024 * 1024 * 1024)}GB"
+    mb = n // (1024 * 1024)
+    return f"{mb}MB"
 
 
 @dataclass
@@ -76,7 +86,7 @@ def _expand_zip_to_items(zip_label: str, data: bytes) -> tuple[list[dict[str, by
                 failed.append(
                     {
                         "name": f"{zip_label}/{base}",
-                        "reason": f"解压后单文件超过 {MAX_SINGLE_UNCOMPRESSED_BYTES // (1024 * 1024)}MB",
+                        "reason": f"解压后单文件超过 {format_size_cap(MAX_SINGLE_UNCOMPRESSED_BYTES)}",
                     }
                 )
                 continue
@@ -121,7 +131,7 @@ def _flatten_upload_items(
                 failed_items.append(
                     {
                         "name": name,
-                        "reason": f"单文件超过 {MAX_SINGLE_UNCOMPRESSED_BYTES // (1024 * 1024)}MB",
+                        "reason": f"单文件超过 {format_size_cap(MAX_SINGLE_UNCOMPRESSED_BYTES)}",
                     }
                 )
                 continue

@@ -2449,7 +2449,12 @@ def _render_module_memory(T: dict, defaults: dict):
             if not files_source:
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
-            from design_import_service import MAX_BATCH_BYTES, build_candidates
+            from design_import_service import (
+                MAX_BATCH_BYTES,
+                MAX_SINGLE_UNCOMPRESSED_BYTES,
+                build_candidates,
+                format_size_cap,
+            )
 
             files_payload = []
             for f in files_source:
@@ -2486,9 +2491,9 @@ def _render_module_memory(T: dict, defaults: dict):
                 file_name = getattr(uploaded_file, "name", "设计图")
                 raw_bytes = uploaded_file.read()
 
-                # 单图大小检查（放宽到 30MB，但仍做安全限制）
-                if len(raw_bytes) > 30 * 1024 * 1024:
-                    msg = f"{file_name}：单个文件超过 30MB，已跳过"
+                # 单文件上限与 design_import_service 一致（与批次总上限对齐，由 build_candidates 已做总字节校验）
+                if len(raw_bytes) > MAX_SINGLE_UNCOMPRESSED_BYTES:
+                    msg = f"{file_name}：单个文件超过 {format_size_cap(MAX_SINGLE_UNCOMPRESSED_BYTES)}，已跳过"
                     results.append({"name": file_name, "status": "failed", "message": msg})
                     fail_count += 1
                     continue
