@@ -222,6 +222,8 @@ def run_upload_to_cases(
     if (existing_cases or "").strip():
         base_ctx = (base_ctx + "\n\n【既有测试用例】\n\n" + existing_cases.strip()).strip()
 
+    # 花括号免疫：勿在此处对 demand/base_ctx 再 replace("{","{{")；已在 crew_test._run_crew_sequential
+    # 注入 kickoff 前由 utils.crewai_template_escape 统一转义，重复转义会导致模型侧出现 {{{{。
     try:
         out = run_pipeline(
             demand,

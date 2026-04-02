@@ -22,6 +22,8 @@ import sys
 from datetime import datetime
 from typing import Any
 
+from utils.crewai_template_escape import escape_curly_braces_for_crewai_inputs
+
 from crewai import Agent, Task, Crew
 from crewai.llm import LLM as CrewAILLM
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -198,7 +200,10 @@ def _build_crew_from_config(
         if not agent:
             continue
         desc = (t.get("description") or "").strip()
-        desc = desc.replace("{project_context}", project_context.strip())
+        desc = desc.replace(
+            "{project_context}",
+            escape_curly_braces_for_crewai_inputs(project_context.strip()),
+        )
         ctx_ids = t.get("context") or []
         context_tasks = [task_map[cid] for cid in ctx_ids if cid in task_map]
         task_map[tid] = Task(
@@ -260,7 +265,7 @@ def _run_crew_sequential(
             verbose=True,
         )
 
-    proj_ctx = (project_context or "").strip()
+    proj_ctx = escape_curly_braces_for_crewai_inputs((project_context or "").strip())
     outputs: dict[str, str] = {}
     step_outputs: list[dict[str, str]] = []
 
@@ -285,13 +290,15 @@ def _run_crew_sequential(
         # 统一使用非流式执行，通过 .raw 可靠获取每步完整输出。
         crew = Crew(agents=[agent], tasks=[task_obj], verbose=True)
 
-        inputs: dict[str, str] = {"prd_content": llm_demand}
+        inputs: dict[str, str] = {
+            "prd_content": escape_curly_braces_for_crewai_inputs(llm_demand),
+        }
         if outputs.get("task1"):
-            inputs["task1_output"] = outputs["task1"]
+            inputs["task1_output"] = escape_curly_braces_for_crewai_inputs(outputs["task1"])
         if outputs.get("task2"):
-            inputs["task2_output"] = outputs["task2"]
+            inputs["task2_output"] = escape_curly_braces_for_crewai_inputs(outputs["task2"])
         if outputs.get("task3"):
-            inputs["task3_output"] = outputs["task3"]
+            inputs["task3_output"] = escape_curly_braces_for_crewai_inputs(outputs["task3"])
 
         result = crew.kickoff(inputs=inputs)
         out_str = str(getattr(result, "raw", result))
