@@ -30,21 +30,40 @@ def render_file_uploader(
     max_size_mb: int = 10,
     key: str = "file_upload",
     label: str = "上传文件",
+    accept_multiple_files: bool = False,
+    on_change: Callable[..., None] | None = None,
 ) -> dict | None:
     """
-    文件上传组件：类型与大小限制，返回统一结构 { path, name, size } 或 None。
-    注意：Streamlit file_uploader 返回 UploadedFile，无 path；返回 { name, size, file } 供调用方读内容。
+    文件上传组件：类型与大小限制，返回统一结构或 None。
+
+    - 单文件：{"name", "size", "file"}
+    - 多文件：{"files": [UploadedFile, ...], "size": 总字节数}（便于设计图批量选择）
     """
     if accepted_types is None:
         accepted_types = ["xlsx", "xls", "csv", "txt"]
-    f = st.file_uploader(
-        label,
-        type=accepted_types,
-        key=key,
-        label_visibility="collapsed" if label == "上传文件" else "visible",
-    )
+    vis = "collapsed" if label == "上传文件" else "visible"
+    uploader_kw: dict = {
+        "label": label,
+        "type": accepted_types,
+        "key": key,
+        "label_visibility": vis,
+    }
+    if accept_multiple_files:
+        uploader_kw["accept_multiple_files"] = True
+    if on_change is not None:
+        uploader_kw["on_change"] = on_change
+    f = st.file_uploader(**uploader_kw)
     if f is None:
         return None
+    if accept_multiple_files:
+        files = f if isinstance(f, list) else [f]
+        if not files:
+            return None
+        total_bytes = sum((getattr(x, "size", None) or 0) for x in files)
+        if max_size_mb and total_bytes > max_size_mb * (1024 * 1024):
+            st.warning(f"所选文件总大小超过 {max_size_mb}MB 限制，请减少文件或缩小后重试。")
+            return None
+        return {"files": files, "size": total_bytes}
     size_mb = (f.size or 0) / (1024 * 1024)
     if max_size_mb and size_mb > max_size_mb:
         st.warning(f"文件超过 {max_size_mb}MB 限制，请缩小后重试。")

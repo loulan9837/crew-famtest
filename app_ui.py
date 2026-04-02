@@ -2340,11 +2340,12 @@ def _render_module_memory(T: dict, defaults: dict):
         from app_ui_components import render_file_uploader
 
         design_upload_result = render_file_uploader(
-            accepted_types=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"],
+            accepted_types=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch", "zip"],
             max_size_mb=500,
             key="design_mockup_upload",
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH，单次总大小≤500MB）",
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
+            accept_multiple_files=True,
         )
         if design_upload_result:
             # 兼容组件返回结构：
@@ -2361,8 +2362,8 @@ def _render_module_memory(T: dict, defaults: dict):
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH，单次总大小≤500MB）",
-            type=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"],
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
+            type=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch", "zip"],
             key="design_mockup_upload",
             accept_multiple_files=True,
             label_visibility="collapsed",
