@@ -718,6 +718,21 @@ def _handle_full_regression_import(
         st.info("导入内容与现有聚合结果一致，未产生新增用例。")
         return
 
+    try:
+        from utils.cloud_memory import is_cloud_memory_configured, sync_text_demand_to_cloud
+
+        if is_cloud_memory_configured():
+            ok, msg = sync_text_demand_to_cloud(
+                file_name=file_display_name,
+                content=merged_content,
+                project_id=project_id,
+                source_type="full_regression",
+            )
+            if not ok:
+                st.warning(f"本地聚合成功，但云端备份异常：{msg}")
+    except Exception as e:
+        st.warning(f"触发云端备份时发生致命错误：{e}")
+
     # 4. 标记上下文缓存与知识库为脏，并生成 Librarian 摘要
     try:
         mark_context_cache_dirty(f"test_cases_{status}")
@@ -1103,6 +1118,8 @@ def _render_main_app(T: dict, cookies=None):
     if "current_project" not in st.session_state:
         st.session_state["current_project"] = PROJECT_FAMBASE
     current_project = _get_current_project()
+
+    _hydrate_local_from_cloud(current_project)
 
     # 设计系统 CSS（见 docs/implementation-handoff-for-programming.md）
     st.markdown("""
@@ -2298,13 +2315,15 @@ def _render_module_memory(T: dict, defaults: dict):
         _tpl = _get_text(T, "memory_tab.full_regression_status") or "全回归用例已导入（{count} 字），生成用例时 Agent 将参考理解。"
         st.success("✓ " + _tpl.format(count=_len_chars))
 
+    _tc_nonce_key = _get_module_state_key(MODULE_MEMORY, "tc_uploader_nonce")
+    _tc_widget_key = f"test_cases_upload_{st.session_state.get(_tc_nonce_key, 0)}"
+
     try:
         from app_ui_components import render_file_uploader
 
-        # 禁止对 file_uploader 的 key 做 session_state 写回，否则会触发 StreamlitValueAssignmentNotAllowedError
         test_cases_upload_result = render_file_uploader(
             accepted_types=["xlsx", "xls", "csv", "txt"],
-            key="test_cases_upload",
+            key=_tc_widget_key,
             label=_get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
         )
         test_cases_file = test_cases_upload_result["file"] if test_cases_upload_result else None
@@ -2312,7 +2331,7 @@ def _render_module_memory(T: dict, defaults: dict):
         test_cases_file = st.file_uploader(
             _get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
             type=["xlsx", "xls", "csv", "txt"],
-            key="test_cases_upload",
+            key=_tc_widget_key,
             label_visibility="collapsed",
         )
 
@@ -3318,6 +3337,54 @@ def _render_module_settings(T: dict, defaults: dict):
             ver_display += f" ({build_str})"
         st.divider()
         st.caption(ver_display)
+
+
+def _hydrate_local_from_cloud(project_id: str) -> None:
+    """系统护盾：应用重启导致本地 DB 被清空时，自动从 Neon 云端抽水回填。"""
+    if not MEMORY_AVAILABLE:
+        return
+
+    flag_key = f"hydrated_{project_id}"
+    if st.session_state.get(flag_key):
+        return  # 单次会话只回填一次
+
+    try:
+        from utils.cloud_memory import is_cloud_memory_configured, load_recent_history_from_neon
+        from memory_store import TEST_CASES_SOURCE_TYPE, add_entry_with_dedup
+
+        if not is_cloud_memory_configured():
+            st.session_state[flag_key] = True
+            return
+
+        cloud_items = load_recent_history_from_neon(limit=50, project_id=project_id)
+
+        for item in reversed(cloud_items):
+            raw = (item.get("raw_content") or "").strip()
+            if not raw:
+                continue
+            c_source_type = item.get("source_type") or ""
+            db_id = item.get("id", 0)
+            c_source_id = item.get("r2_object_key") or f"cloud_text_rec_{db_id}"
+
+            if c_source_type == "full_regression":
+                local_type = TEST_CASES_SOURCE_TYPE
+                local_id = "full_regression"
+            else:
+                local_type = c_source_type
+                local_id = c_source_id
+
+            add_entry_with_dedup(
+                source_type=local_type,
+                content=raw,
+                source_id=local_id,
+                title=item.get("file_name") or "",
+                summary=raw[:500],
+                project_id=project_id,
+            )
+
+        st.session_state[flag_key] = True
+    except Exception as e:
+        print(f"[Cloud Hydration Error] 项目 {project_id} 回填失败: {e}")
 
 
 def main():
