@@ -1380,14 +1380,15 @@ def _render_paste_mode(T: dict, defaults: dict):
         on_change=_make_persist_callback("run_paste_content"),
     ).strip()
 
-    _restore_widget_state("run_paste_xlsx", None)
+    # file_uploader 禁止通过 session_state 预写/清空同名 key，否则触发 StreamlitValueAssignmentNotAllowedError
+    _paste_xlsx_nonce_key = _get_module_state_key(MODULE_RUN, "paste_xlsx_uploader_nonce")
+    _paste_xlsx_widget_key = f"run_paste_xlsx_{st.session_state.get(_paste_xlsx_nonce_key, 0)}"
     xlsx_uploaded = st.file_uploader(
         "可选：上传 .xlsx 既有用例",
         type=["xlsx"],
         accept_multiple_files=False,
-        key="run_paste_xlsx",
+        key=_paste_xlsx_widget_key,
         help="可选；上传后作为 Agent 上下文",
-        on_change=_make_persist_callback("run_paste_xlsx"),
     )
 
     # 缓存粘贴模式下上传的 xlsx，切换 Tab / 模式后仍保留
@@ -1407,7 +1408,7 @@ def _render_paste_mode(T: dict, defaults: dict):
     # 用户主动清空时才重置缓存，满足 F6-2 约束
     if st.button("清空文本与附件", key="run_paste_reset"):
         st.session_state["run_paste_content"] = ""
-        st.session_state["run_paste_xlsx"] = None
+        st.session_state[_paste_xlsx_nonce_key] = int(st.session_state.get(_paste_xlsx_nonce_key, 0)) + 1
         st.session_state.pop(xlsx_cache_key, None)
         _clear_persist_widget_state("run_paste_content", project_scoped=True)
         _clear_persist_widget_state("run_paste_xlsx", project_scoped=True)
@@ -1560,14 +1561,14 @@ def _render_upload_mode(T: dict, defaults: dict):
         "支持 .md / .docx（需求文档）和 .xlsx（表格 PRD 或既有测试用例），可混合选择。至少需 1 个需求文档。"
     )
 
-    _restore_widget_state("run_upload_files", None)
+    _upload_nonce_key = _get_module_state_key(MODULE_RUN, "upload_uploader_nonce")
+    _upload_widget_key = f"run_upload_files_{st.session_state.get(_upload_nonce_key, 0)}"
     uploaded = st.file_uploader(
         "上传需求文档与既有用例",
         type=["md", "docx", "xlsx"],
         accept_multiple_files=True,
-        key="run_upload_files",
+        key=_upload_widget_key,
         help="支持 .md、.docx（Word）、.xlsx，可混合选择；单文件 &lt; 10MB，总 &lt; 50MB",
-        on_change=_make_persist_callback("run_upload_files"),
     )
 
     # 将上传文件缓存到 session_state，切换 Tab 或 demand_source 后仍可使用（按项目隔离，避免空 read 覆盖）
@@ -1592,7 +1593,7 @@ def _render_upload_mode(T: dict, defaults: dict):
     _upload_result_key = _get_module_state_key(MODULE_RUN, "upload_last_run")
     _upload_error_key = _get_module_state_key(MODULE_RUN, "upload_last_error")
     if st.button("清空已选文件", key="run_upload_reset"):
-        st.session_state["run_upload_files"] = None
+        st.session_state[_upload_nonce_key] = int(st.session_state.get(_upload_nonce_key, 0)) + 1
         st.session_state[_upload_result_key] = None
         st.session_state[_upload_error_key] = None
         st.session_state.pop(_scoped_upload_cache_key("pcb_demand_upload"), None)
@@ -2195,22 +2196,19 @@ def _render_module_memory(T: dict, defaults: dict):
     try:
         from app_ui_components import render_file_uploader
 
-        _restore_widget_state("test_cases_upload", None)
+        # 禁止对 file_uploader 的 key 做 session_state 写回，否则会触发 StreamlitValueAssignmentNotAllowedError
         test_cases_upload_result = render_file_uploader(
             accepted_types=["xlsx", "xls", "csv", "txt"],
             key="test_cases_upload",
             label=_get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
-            on_change=_make_persist_callback("test_cases_upload"),
         )
         test_cases_file = test_cases_upload_result["file"] if test_cases_upload_result else None
     except ImportError:
-        _restore_widget_state("test_cases_upload", None)
         test_cases_file = st.file_uploader(
             _get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
             type=["xlsx", "xls", "csv", "txt"],
             key="test_cases_upload",
             label_visibility="collapsed",
-            on_change=_make_persist_callback("test_cases_upload"),
         )
 
     # 缓存测试用例上传文件，切换 Tab 后仍可使用（按项目隔离；仅非空字节覆盖，避免 rerun 时空 read 清空缓存）
@@ -2358,7 +2356,6 @@ def _render_module_memory(T: dict, defaults: dict):
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
             or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
             accept_multiple_files=True,
-            on_change=_make_persist_callback("design_mockup_upload"),
         )
         if design_upload_result:
             # 兼容组件返回结构：
@@ -2380,7 +2377,6 @@ def _render_module_memory(T: dict, defaults: dict):
             key="design_mockup_upload",
             accept_multiple_files=True,
             label_visibility="collapsed",
-            on_change=_make_persist_callback("design_mockup_upload"),
         )
 
     # 缓存设计图上传文件，按项目隔离；切项目后切回可恢复原项目上下文
