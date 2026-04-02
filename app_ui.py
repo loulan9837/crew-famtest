@@ -2200,6 +2200,7 @@ def _render_module_memory(T: dict, defaults: dict):
             accepted_types=["xlsx", "xls", "csv", "txt"],
             key="test_cases_upload",
             label=_get_text(T, "memory_tab.test_cases_upload_placeholder") or "上传文件",
+            on_change=_make_persist_callback("test_cases_upload"),
         )
         test_cases_file = test_cases_upload_result["file"] if test_cases_upload_result else None
     except ImportError:
@@ -2220,6 +2221,17 @@ def _render_module_memory(T: dict, defaults: dict):
         data = _safe_bytes_from_streamlit_upload(test_cases_file)
         if data:
             st.session_state[tc_cache_key] = {"name": name, "bytes": data}
+
+    _tc_cached = st.session_state.get(tc_cache_key)
+    if _tc_cached and isinstance(_tc_cached, dict) and (_tc_cached.get("bytes") or b"") and not test_cases_file:
+        _tn = (_tc_cached.get("name") or "测试用例文件").strip() or "测试用例文件"
+        st.caption(
+            _get_text(
+                T,
+                "memory_tab.test_cases_session_cache_hint",
+                "已从本会话保留上传文件「{name}」。切换模块后选择框可能为空，可直接点击「导入测试用例」；若要更换文件请重新上传。",
+            ).format(name=_tn)
+        )
 
     _restore_widget_state("test_cases_paste", "")
     test_cases_paste = st.text_area(
@@ -2346,6 +2358,7 @@ def _render_module_memory(T: dict, defaults: dict):
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
             or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
             accept_multiple_files=True,
+            on_change=_make_persist_callback("design_mockup_upload"),
         )
         if design_upload_result:
             # 兼容组件返回结构：
@@ -2367,6 +2380,7 @@ def _render_module_memory(T: dict, defaults: dict):
             key="design_mockup_upload",
             accept_multiple_files=True,
             label_visibility="collapsed",
+            on_change=_make_persist_callback("design_mockup_upload"),
         )
 
     # 缓存设计图上传文件，按项目隔离；切项目后切回可恢复原项目上下文
@@ -2395,6 +2409,26 @@ def _render_module_memory(T: dict, defaults: dict):
         if cached_list:
             cache_map[project_id] = cached_list
             st.session_state[design_cache_key] = cache_map
+
+    _design_pending = (st.session_state.get(design_cache_key) or {}).get(project_id) or []
+    if (
+        isinstance(_design_pending, list)
+        and _design_pending
+        and not (design_files if isinstance(design_files, list) else design_files)
+    ):
+        _names = [
+            (str(x.get("name") or "").strip() or "未命名")
+            for x in _design_pending
+            if isinstance(x, dict)
+        ]
+        _preview = "、".join(_names[:8]) + ("…" if len(_names) > 8 else "")
+        st.caption(
+            _get_text(
+                T,
+                "memory_tab.design_session_cache_hint",
+                "已从本会话保留 {count} 个待导入设计图文件（{names}）。切换模块后选择框可能为空，可直接点击「解析并导入」；追加文件可再次上传。",
+            ).format(count=len(_names), names=_preview)
+        )
 
     if st.button(
         _get_text(T, "memory_tab.design_mockup_import_btn") or "解析并导入",
@@ -2594,7 +2628,8 @@ def _render_module_memory(T: dict, defaults: dict):
     # 设计图历史列表（整个时间轴可整体展开/收起）
     with st.expander("设计图历史", expanded=False):
         try:
-            from memory_store import list_for_browse, DESIGN_MOCKUP_SOURCE_TYPE
+            # 勿在此处再 import DESIGN_MOCKUP_SOURCE_TYPE，否则会在整个函数内遮蔽模块级名称，触发 UnboundLocalError
+            from memory_store import list_for_browse
         except ImportError:
             st.caption("当前运行环境未启用项目记忆存储，无法展示设计图历史。")
         else:
