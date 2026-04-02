@@ -24,11 +24,13 @@ jobs:
 
       - name: Install PostgreSQL client and backup deps
         run: |
-          # 添加 PostgreSQL 官方源以获取 17 版本
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc &>/dev/null
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
+
+          # 关键新增：强行把17版本的工具箱设为系统第一优先级！
+          echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
           pip install -r requirements-backup.txt
 
