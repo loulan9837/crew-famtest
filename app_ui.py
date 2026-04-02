@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any
 
 import streamlit as st
@@ -2056,11 +2057,13 @@ def _render_module_memory(T: dict, defaults: dict):
             )
         )
 
+    cloud_configured = False
     cloud_sync_ok = False
     try:
         from utils.cloud_memory import is_cloud_memory_configured
 
-        if is_cloud_memory_configured():
+        cloud_configured = bool(is_cloud_memory_configured())
+        if cloud_configured:
             if "cloud_memory_sync_enabled" not in st.session_state:
                 st.session_state["cloud_memory_sync_enabled"] = True
             st.checkbox(
@@ -2071,7 +2074,122 @@ def _render_module_memory(T: dict, defaults: dict):
             st.caption(_get_text(T, "memory_tab.cloud_memory_sync_note") or "")
             cloud_sync_ok = bool(st.session_state.get("cloud_memory_sync_enabled", True))
     except ImportError:
+        cloud_configured = False
         cloud_sync_ok = False
+
+    # 手动拉取/推送：与「导入时同步」复选框解耦，只要 Neon+R2 配齐即可（避免关同步后无法恢复）
+    if cloud_configured:
+        st.divider()
+        st.markdown("**云端数据护盾**")
+        col_pull, col_push = st.columns(2)
+
+        with col_pull:
+            if st.button(
+                "☁️ 从云端强制拉取/恢复本项目的记忆",
+                key="manual_hydrate_btn",
+                help="如果发现本地数据丢失，点击此按钮从 Neon 数据库重载数据",
+            ):
+                with st.spinner("正在连接 Neon 数据库拉取记忆..."):
+                    try:
+                        from utils.cloud_memory import load_recent_history_from_neon
+
+                        cloud_items = load_recent_history_from_neon(limit=50, project_id=project_id)
+                        if not cloud_items:
+                            st.info("云端暂无本项目的数据，或已被清空。")
+                        else:
+                            restored = 0
+                            for item in reversed(cloud_items):
+                                raw = (item.get("raw_content") or "").strip()
+                                if not raw:
+                                    continue
+                                c_source_type = item.get("source_type") or ""
+                                db_id = item.get("id", 0)
+                                c_source_id = item.get("r2_object_key") or f"cloud_text_rec_{db_id}"
+                                if c_source_type == "full_regression":
+                                    local_type = TEST_CASES_SOURCE_TYPE
+                                    local_id = "full_regression"
+                                else:
+                                    local_type = c_source_type
+                                    local_id = c_source_id
+                                _row_id, _st = add_entry_with_dedup(
+                                    source_type=local_type,
+                                    content=raw,
+                                    source_id=local_id,
+                                    title=item.get("file_name") or "",
+                                    summary=raw[:500],
+                                    project_id=project_id,
+                                )
+                                if _st != "skipped":
+                                    restored += 1
+                            st.success(
+                                f"恢复完成：已处理 {len(cloud_items)} 条云端记录，其中新写入或更新 {restored} 条（其余可能因去重跳过）。"
+                            )
+                            time.sleep(1)
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"恢复失败：{e}")
+
+        with col_push:
+            if st.button(
+                "🚀 强制将本地记忆同步至云端",
+                key="manual_push_btn",
+                help="将本地最近项目记忆以文本形式备份至 Neon（R2 元数据字段可为空；设计图原文件需单独走导入同步）",
+            ):
+                prog = None
+                try:
+                    from utils.cloud_memory import sync_text_demand_to_cloud
+
+                    local_entries = list_recent(limit=100, project_id=project_id)
+                    if not local_entries:
+                        st.info("本地暂无数据，无需同步。")
+                    else:
+                        sync_count = 0
+                        skip_count = 0
+                        err_count = 0
+                        prog = st.progress(0, text="正在扫描并同步至云端...")
+                        n = len(local_entries)
+                        for idx, e in enumerate(local_entries):
+                            prog.progress((idx + 1) / max(n, 1), text="正在扫描并同步至云端...")
+                            content = (e.get("content") or e.get("summary") or "").strip()
+                            if not content:
+                                skip_count += 1
+                                continue
+                            fn = (e.get("title") or "").strip() or "未命名记录"
+                            s_type = (e.get("source_type") or "").strip() or "manual"
+                            sid = (e.get("source_id") or "").strip()
+                            # 仅聚合行用 full_regression；其余 test_cases（含归档批次）用 test_cases，避免回流时全部覆盖同一 source_id
+                            if s_type == TEST_CASES_SOURCE_TYPE and sid == "full_regression":
+                                cloud_type = "full_regression"
+                            elif s_type == TEST_CASES_SOURCE_TYPE:
+                                cloud_type = "test_cases"
+                            else:
+                                cloud_type = s_type
+                            ok, msg = sync_text_demand_to_cloud(
+                                file_name=fn,
+                                content=content,
+                                project_id=project_id,
+                                source_type=cloud_type,
+                                skip_if_duplicate=True,
+                            )
+                            if ok:
+                                if "跳过" in (msg or ""):
+                                    skip_count += 1
+                                else:
+                                    sync_count += 1
+                            else:
+                                err_count += 1
+                        if err_count:
+                            st.warning(f"同步结束：新上云 {sync_count} 条，跳过 {skip_count} 条，失败 {err_count} 条。")
+                        else:
+                            st.success(f"同步任务完成！新上云 {sync_count} 条，云端已存在并跳过 {skip_count} 条。")
+                        if prog is not None:
+                            prog.empty()
+                        time.sleep(1)
+                        st.rerun()
+                except Exception as e:
+                    if prog is not None:
+                        prog.empty()
+                    st.error(f"同步失败：{e}")
 
     # Agent 知识库区块
     try:
