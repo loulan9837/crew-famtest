@@ -1,6 +1,7 @@
 # Streamlit 配置（本地与 Cloud 通用）
+# 注意：勿在此写死 port（如 8501）。Community Cloud 由平台分配端口，固定端口易导致重启时报
+# 「Port 8501 is not available」应用无法启动。本地需要指定端口请用：streamlit run app.py --server.port 8501
 [server]
-port = 8501
 headless = true
 # 设计图等上传需与 design_import_service.MAX_BATCH_BYTES（1GB）一致；默认 200 会在服务端直接拒收大文件
 maxUploadSize = 1024
