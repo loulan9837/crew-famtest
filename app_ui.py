@@ -2351,10 +2351,10 @@ def _render_module_memory(T: dict, defaults: dict):
 
         design_upload_result = render_file_uploader(
             accepted_types=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch", "zip"],
-            max_size_mb=500,
+            max_size_mb=1024,
             key="design_mockup_upload",
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤1GB）",
             accept_multiple_files=True,
         )
         if design_upload_result:
@@ -2372,7 +2372,7 @@ def _render_module_memory(T: dict, defaults: dict):
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤500MB）",
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH/ZIP，单次总大小≤1GB）",
             type=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch", "zip"],
             key="design_mockup_upload",
             accept_multiple_files=True,
@@ -2449,7 +2449,7 @@ def _render_module_memory(T: dict, defaults: dict):
             if not files_source:
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
-            from design_import_service import build_candidates
+            from design_import_service import MAX_BATCH_BYTES, build_candidates
 
             files_payload = []
             for f in files_source:
@@ -2458,9 +2458,9 @@ def _render_module_memory(T: dict, defaults: dict):
                 except Exception:
                     files_payload.append({"name": getattr(f, "name", "设计图"), "bytes": b""})
             candidates, pre_failed, total_size_bytes = build_candidates(files_payload)
-            if total_size_bytes > 500 * 1024 * 1024:
+            if total_size_bytes > MAX_BATCH_BYTES:
                 st.error(
-                    (_get_text(T, "memory_tab.design_import_total_size_exceeded") or "本次导入总大小超过 500MB，已拦截。")
+                    (_get_text(T, "memory_tab.design_import_total_size_exceeded") or "本次导入总大小超过 1GB，已拦截。")
                 )
                 st.session_state["design_import_results"] = [
                     {"name": i.get("name", ""), "status": "failed", "message": i.get("reason", "")}

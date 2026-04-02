@@ -10,7 +10,7 @@ from io import BytesIO
 # 解压后参与解析的扩展名（不含 zip 容器本身）
 SUPPORTED_EXTS = {"png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"}
 ZIP_EXT = "zip"
-MAX_BATCH_BYTES = 500 * 1024 * 1024  # 500MB（解压后合计）
+MAX_BATCH_BYTES = 1024 * 1024 * 1024  # 1GB（解压后合计）
 MAX_FILES_PER_ZIP = 500
 # 与 app_ui 单图上限对齐，防止 ZIP 内超大文件撑爆内存
 MAX_SINGLE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024
@@ -148,9 +148,10 @@ def build_candidates(
     seen_hashes: set[str] = set()
 
     if total_size_bytes > max_batch_bytes:
+        limit_gb = max(1, max_batch_bytes // (1024 * 1024 * 1024))
         return (
             [],
-            failed_items + [{"name": "本次导入", "reason": "解压后总大小超过 500MB"}],
+            failed_items + [{"name": "本次导入", "reason": f"解压后总大小超过 {limit_gb}GB"}],
             total_size_bytes,
         )
 
