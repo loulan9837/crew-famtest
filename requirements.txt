@@ -7,3 +7,5 @@ PyYAML
 keyring>=24.0.0
 streamlit-cookies-manager-v2>=0.3.1
 pytest>=7.0.0
+boto3>=1.34.0
+psycopg2-binary>=2.9.9
