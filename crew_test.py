@@ -1444,13 +1444,16 @@ def run_pipeline(
     local: bool = False,
     export_excel: bool = True,
     export_sheets: bool = False,
+    export_quip: bool = False,
+    export_quip_target: str | None = None,
     demand_title: str | None = None,
     agents_config_path: str | None = None,
     project_context: str | None = None,
     return_details: bool = False,
 ) -> str | dict[str, Any]:
     """跑完整个流程，并把结果写入 output_dir。可同时导出 Excel / Google 表格。
-    若 return_details=True，返回 dict：result_str, step_outputs, excel_path, sheets_url, timestamp；否则返回 result_str。"""
+    export_quip / export_quip_target：仅与 pipeline_service 关键字参数兼容；Quip 导出已下线，不会执行导出。
+    若 return_details=True，返回 dict：含 result_str、step_outputs、excel_path、sheets_url、timestamp、txt_path、quip_url；否则返回 result_str。"""
     if mock:
         return run_mock_pipeline(demand, output_dir)
     if local:
@@ -1539,7 +1542,10 @@ def run_pipeline(
             "sheets_url": sheets_url,
             "timestamp": timestamp,
             "txt_path": out_path,
+            "quip_url": None,
         }
+    if export_quip or (export_quip_target or "").strip():
+        print("提示: Quip 导出已移除，已忽略 export_quip / export_quip_target。", file=sys.stderr)
     return result_str
 
 
