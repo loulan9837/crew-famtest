@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -185,16 +186,53 @@ def _make_persist_callback(widget_key: str, project_scoped: bool = True):
     return _cb
 
 
+def _scoped_upload_cache_key(base: str, project_id: str | None = None) -> str:
+    """按项目隔离的上传字节缓存 session_state 键。
+
+    不使用 run_/mem_ 前缀，避免 _clear_project_related_state 在切换项目时误删跨项目缓存备份。
+    """
+    pid = (project_id or _get_current_project() or "DEFAULT").upper()
+    pid = re.sub(r"[^A-Z0-9_]", "_", pid)
+    return f"{base}_{pid}"
+
+
+def _safe_bytes_from_streamlit_upload(f) -> bytes:
+    """读取 Streamlit UploadedFile 字节：优先 getvalue()，避免二次 read() 在 EOF 返回空并覆盖缓存。"""
+    if f is None:
+        return b""
+    try:
+        gv = getattr(f, "getvalue", None)
+        if callable(gv):
+            data = gv()
+            if isinstance(data, bytes) and data:
+                return data
+    except Exception:
+        pass
+    try:
+        data = f.read()
+        if isinstance(data, bytes) and data:
+            return data
+    except Exception:
+        pass
+    return b""
+
+
+def _migrate_legacy_upload_cache(old_key: str, new_key: str) -> None:
+    """将旧的全局缓存键迁移到项目作用域键（仅当新键尚无数据时）。"""
+    if old_key in st.session_state and new_key not in st.session_state:
+        st.session_state[new_key] = st.session_state.pop(old_key)
+
+
 def _has_unsaved_project_state() -> bool:
     """粗粒度检测当前项目下是否存在未保存的用户输入，用于项目切换前确认。"""
     s = st.session_state
     if (s.get("run_paste_content") or "").strip():
         return True
-    if s.get("run_upload_files_cache"):
+    if s.get(_scoped_upload_cache_key("pcb_demand_upload")):
         return True
     if (s.get("mem_demand_paste") or "").strip():
         return True
-    if s.get("memory_test_cases_upload_cache"):
+    if s.get(_scoped_upload_cache_key("pcb_memory_test_cases_upload")):
         return True
     if (s.get("test_cases_paste") or "").strip():
         return True
@@ -202,6 +240,11 @@ def _has_unsaved_project_state() -> bool:
         return True
     if (s.get("risk_report_paste") or "").strip():
         return True
+    _design_map = s.get("persist_design_mockup_upload_cache_by_project")
+    if isinstance(_design_map, dict):
+        _design_list = _design_map.get(_get_current_project()) or []
+        if any((x.get("bytes") or b"") for x in _design_list if isinstance(x, dict)):
+            return True
     if s.get("case_chat_prd_context") or s.get("case_chat_cases_context") or s.get("case_chat_messages"):
         return True
     return False
@@ -677,6 +720,30 @@ def _handle_full_regression_import(
             _generate_entry_summary(rowid, merged_content, defaults.get("gemini_key", ""))
     except Exception:
         # 摘要失败不影响主流程
+        pass
+
+    # 5. 全回归聚合确有更新时自动构建 Agent 知识库（AC3b，与手动「刷新知识库」同一逻辑）
+    os.environ["APP_CURRENT_PROJECT"] = _normalize_project_id(project_id)
+    try:
+        from agent_knowledge_service import build_agent_knowledge
+
+        _kr_spin = _get_text(T, "memory_tab.knowledge_refresh_after_regression") or (
+            "正在根据最新全回归用例更新Agent知识库…"
+        )
+        with st.spinner(_kr_spin):
+            kb_ok, kb_err = build_agent_knowledge(
+                gemini_key=defaults.get("gemini_key", ""),
+                gemini_model=defaults.get("gemini_model", ""),
+                project_id=project_id,
+            )
+        if not kb_ok:
+            _kr_fail = _get_text(T, "memory_tab.knowledge_refresh_after_regression_fail") or (
+                "知识库自动更新失败，导入已成功。可在项目记忆页点击「刷新知识库」重试。详情：{err}"
+            )
+            st.warning(_kr_fail.replace("{err}", kb_err))
+        else:
+            st.session_state[_get_module_state_key(MODULE_MEMORY, "kb_auto_done")] = True
+    except ImportError:
         pass
 
     if added_rows > 0:
@@ -1503,19 +1570,17 @@ def _render_upload_mode(T: dict, defaults: dict):
         on_change=_make_persist_callback("run_upload_files"),
     )
 
-    # 将上传文件缓存到 session_state，切换 Tab 或 demand_source 后仍可使用
-    cache_key = "run_upload_files_cache"
+    # 将上传文件缓存到 session_state，切换 Tab 或 demand_source 后仍可使用（按项目隔离，避免空 read 覆盖）
+    cache_key = _scoped_upload_cache_key("pcb_demand_upload")
+    _migrate_legacy_upload_cache("run_upload_files_cache", cache_key)
     if uploaded:
         files = uploaded if isinstance(uploaded, list) else [uploaded]
         cached = []
         for f in files:
-            try:
-                name = getattr(f, "name", "") or "未命名"
-                data = f.read()
-            except Exception:
-                continue
+            name = getattr(f, "name", "") or "未命名"
+            data = _safe_bytes_from_streamlit_upload(f)
             cached.append({"name": name, "bytes": data})
-        if cached:
+        if any(item.get("bytes") for item in cached):
             st.session_state[cache_key] = cached
     cached_files = st.session_state.get(cache_key) or []
     effective_files = [
@@ -1530,6 +1595,7 @@ def _render_upload_mode(T: dict, defaults: dict):
         st.session_state["run_upload_files"] = None
         st.session_state[_upload_result_key] = None
         st.session_state[_upload_error_key] = None
+        st.session_state.pop(_scoped_upload_cache_key("pcb_demand_upload"), None)
         st.session_state.pop("run_upload_files_cache", None)
         _clear_persist_widget_state("run_upload_files", project_scoped=True)
         _clear_persist_widget_state("run_upload_model", project_scoped=True)
@@ -1929,6 +1995,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 ok, err = build_agent_knowledge(
                     gemini_key=defaults.get("gemini_key", ""),
                     gemini_model=defaults.get("gemini_model", ""),
+                    project_id=project_id,
                 )
                 if ok:
                     st.rerun()
@@ -1941,6 +2008,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 ok, err = build_agent_knowledge(
                     gemini_key=defaults.get("gemini_key", ""),
                     gemini_model=defaults.get("gemini_model", ""),
+                    project_id=project_id,
                 )
                 if ok:
                     st.success(_get_text(T, "memory_tab.knowledge_refresh_success") or "知识库已更新")
@@ -2144,15 +2212,14 @@ def _render_module_memory(T: dict, defaults: dict):
             on_change=_make_persist_callback("test_cases_upload"),
         )
 
-    # 缓存测试用例上传文件，切换 Tab 后仍可使用
-    tc_cache_key = "memory_test_cases_upload_cache"
+    # 缓存测试用例上传文件，切换 Tab 后仍可使用（按项目隔离；仅非空字节覆盖，避免 rerun 时空 read 清空缓存）
+    tc_cache_key = _scoped_upload_cache_key("pcb_memory_test_cases_upload", project_id)
+    _migrate_legacy_upload_cache("memory_test_cases_upload_cache", tc_cache_key)
     if test_cases_file:
-        try:
-            name = getattr(test_cases_file, "name", "") or "测试用例上传"
-            data = test_cases_file.read()
+        name = getattr(test_cases_file, "name", "") or "测试用例上传"
+        data = _safe_bytes_from_streamlit_upload(test_cases_file)
+        if data:
             st.session_state[tc_cache_key] = {"name": name, "bytes": data}
-        except Exception:
-            pass
 
     _restore_widget_state("test_cases_paste", "")
     test_cases_paste = st.text_area(
@@ -2173,12 +2240,12 @@ def _render_module_memory(T: dict, defaults: dict):
             file_for_import = _MemoryUpload(cached_tc["name"], cached_tc["bytes"])
         elif test_cases_file:
             # 理论上上方缓存已存在；此分支仅作为兜底
-            try:
-                name = getattr(test_cases_file, "name", "") or "测试用例上传"
-                data = test_cases_file.read()
+            name = getattr(test_cases_file, "name", "") or "测试用例上传"
+            data = _safe_bytes_from_streamlit_upload(test_cases_file)
+            if data:
                 file_display_name = name
-                file_for_import = _MemoryUpload(name, data or b"")
-            except Exception:
+                file_for_import = _MemoryUpload(name, data)
+            else:
                 file_for_import = None
 
         if file_for_import:
@@ -2264,16 +2331,20 @@ def _render_module_memory(T: dict, defaults: dict):
         _get_text(T, "memory_tab.design_mockup_caption")
         or "上传 Figma/截图等设计稿，Agent 将理解界面布局与交互细节。"
     )
+    st.caption(
+        _get_text(T, "memory_tab.design_import_add_more")
+        or "浏览器若不支持一次多目录选择，可分多次追加目录/文件后统一导入。"
+    )
 
     try:
         from app_ui_components import render_file_uploader
 
         design_upload_result = render_file_uploader(
-            accepted_types=["png", "jpg", "jpeg", "pdf", "zip"],
+            accepted_types=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"],
             max_size_mb=500,
             key="design_mockup_upload",
             label=_get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤500MB）",
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH，单次总大小≤500MB）",
         )
         if design_upload_result:
             # 兼容组件返回结构：
@@ -2290,26 +2361,39 @@ def _render_module_memory(T: dict, defaults: dict):
     except ImportError:
         design_files = st.file_uploader(
             _get_text(T, "memory_tab.design_mockup_upload_label")
-            or "上传设计图（PNG / JPG / PDF / ZIP，单文件 ≤500MB）",
-            type=["png", "jpg", "jpeg", "pdf", "zip"],
+            or "上传设计图（PNG/JPG/JPEG/WEBP/PDF/FIG/SKETCH，单次总大小≤500MB）",
+            type=["png", "jpg", "jpeg", "webp", "pdf", "fig", "sketch"],
             key="design_mockup_upload",
             accept_multiple_files=True,
             label_visibility="collapsed",
         )
 
-    # 缓存设计图上传文件，切换 Tab 后仍可使用
-    design_cache_key = "memory_design_mockup_upload_cache"
+    # 缓存设计图上传文件，按项目隔离；切项目后切回可恢复原项目上下文
+    design_cache_key = "persist_design_mockup_upload_cache_by_project"
+    cache_map = st.session_state.get(design_cache_key) or {}
+    if not isinstance(cache_map, dict):
+        cache_map = {}
     if design_files:
-        cached_list: list[dict[str, bytes]] = []
+        import hashlib
+
+        cached_list: list[dict[str, Any]] = list(cache_map.get(project_id) or [])
         for f in (design_files or []):
-            try:
-                name = getattr(f, "name", "") or "设计图"
-                data = f.read()
-            except Exception:
+            name = getattr(f, "name", "") or "设计图"
+            data = _safe_bytes_from_streamlit_upload(f)
+            if not data:
+                continue
+            # 支持 Finder 多目录差异：允许用户多次追加选择，按内容 hash 去重
+            h = hashlib.sha256(data).hexdigest()
+            exists = any(
+                hashlib.sha256((i.get("bytes") or b"")).hexdigest() == h
+                for i in cached_list
+            )
+            if exists:
                 continue
             cached_list.append({"name": name, "bytes": data})
         if cached_list:
-            st.session_state[design_cache_key] = cached_list
+            cache_map[project_id] = cached_list
+            st.session_state[design_cache_key] = cache_map
 
     if st.button(
         _get_text(T, "memory_tab.design_mockup_import_btn") or "解析并导入",
@@ -2319,7 +2403,7 @@ def _render_module_memory(T: dict, defaults: dict):
         if not gemini_key:
             st.error(_get_text(T, "memory_tab.design_mockup_key_missing") or "请先在设置中配置 Gemini API Key")
         else:
-            cached_design = st.session_state.get(design_cache_key) or []
+            cached_design = (st.session_state.get(design_cache_key) or {}).get(project_id) or []
             # 始终优先使用缓存中的原始字节，避免二次 read 导致游标在 EOF 位置
             files_source: list[_MemoryUpload] = []
             if cached_design:
@@ -2327,65 +2411,41 @@ def _render_module_memory(T: dict, defaults: dict):
             elif design_files:
                 # 理论上上方缓存已存在；此分支仅作为兜底
                 for f in (design_files or []):
-                    try:
-                        name = getattr(f, "name", "") or "设计图"
-                        data = f.read()
-                        files_source.append(_MemoryUpload(name, data or b""))
-                    except Exception:
-                        continue
+                    name = getattr(f, "name", "") or "设计图"
+                    data = _safe_bytes_from_streamlit_upload(f)
+                    if data:
+                        files_source.append(_MemoryUpload(name, data))
             if not files_source:
                 st.error(_get_text(T, "memory_tab.import_required") or "请上传设计图文件")
                 return
+            from design_import_service import build_candidates
 
-            # 展开 zip：用户可以上传一个包含多张 PNG/JPG/PDF 的 zip
-            expanded_files: list[_MemoryUpload] = []
-            from io import BytesIO
-            import zipfile
-
-            # 单次导入的设计图数量上限：放宽到 3000 张，兼顾大批量导入与性能
-            MAX_IMAGES_FROM_ARCHIVES = 3000
-            image_count = 0
-
+            files_payload = []
             for f in files_source:
-                name = getattr(f, "name", "") or "设计图"
-                raw = f.read()
-                ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
-                if ext == "zip":
-                    try:
-                        zf = zipfile.ZipFile(BytesIO(raw))
-                    except Exception as ex:
-                        st.error(f"{name}：ZIP 解析失败 - {ex}")
-                        continue
-                    for zi in zf.infolist():
-                        if zi.is_dir():
-                            continue
-                        inner_name = zi.filename.rsplit("/", 1)[-1]
-                        inner_ext = inner_name.lower().rsplit(".", 1)[-1] if "." in inner_name else ""
-                        if inner_ext not in ("png", "jpg", "jpeg", "pdf"):
-                            continue
-                        if image_count >= MAX_IMAGES_FROM_ARCHIVES:
-                            break
-                        try:
-                            data = zf.read(zi)
-                        except Exception:
-                            continue
-                        expanded_files.append(_MemoryUpload(inner_name, data))
-                        image_count += 1
-                    zf.close()
-                else:
-                    expanded_files.append(f)
-
-            if not expanded_files:
-                st.error("ZIP 中未找到可用的 PNG/JPG/PDF 设计图")
+                try:
+                    files_payload.append({"name": getattr(f, "name", "设计图"), "bytes": f.read()})
+                except Exception:
+                    files_payload.append({"name": getattr(f, "name", "设计图"), "bytes": b""})
+            candidates, pre_failed, total_size_bytes = build_candidates(files_payload)
+            if total_size_bytes > 500 * 1024 * 1024:
+                st.error(
+                    (_get_text(T, "memory_tab.design_import_total_size_exceeded") or "本次导入总大小超过 500MB，已拦截。")
+                )
+                st.session_state["design_import_results"] = [
+                    {"name": i.get("name", ""), "status": "failed", "message": i.get("reason", "")}
+                    for i in pre_failed
+                ]
                 return
 
-            # 实际处理的文件列表：限制单次最多 MAX_IMAGES_FROM_ARCHIVES 个
-            files_to_process = expanded_files[:MAX_IMAGES_FROM_ARCHIVES]
+            files_to_process = [_MemoryUpload(c.name, c.data) for c in candidates]
 
             import_count = 0
             skip_count = 0
-            fail_count = 0
-            results: list[dict[str, str]] = []
+            fail_count = len(pre_failed)
+            results: list[dict[str, str]] = [
+                {"name": i.get("name", ""), "status": "failed", "message": i.get("reason", "")}
+                for i in pre_failed
+            ]
 
             import hashlib
             import time
@@ -2409,9 +2469,12 @@ def _render_module_memory(T: dict, defaults: dict):
                     "jpg": "image/jpeg",
                     "jpeg": "image/jpeg",
                     "png": "image/png",
+                    "webp": "image/webp",
                     "pdf": "application/pdf",
+                    "fig": "application/octet-stream",
+                    "sketch": "application/octet-stream",
                 }
-                mime_type = mime_map.get(ext, "image/png")
+                mime_type = mime_map.get(ext, "application/octet-stream")
 
                 pages_bytes: list[tuple[bytes, str]] = []
                 if ext == "pdf":
@@ -2500,7 +2563,7 @@ def _render_module_memory(T: dict, defaults: dict):
 
             if import_count:
                 st.success(
-                    (_get_text(T, "memory_tab.design_mockup_success") or "设计图已解析导入，下次生成用例时 Agent 将参考。")
+                    (_get_text(T, "memory_tab.design_import_partial_success") or _get_text(T, "memory_tab.design_mockup_success") or "设计图已解析导入，下次生成用例时 Agent 将参考。")
                     + f"（成功 {import_count} 个，跳过 {skip_count} 个，失败 {fail_count} 个）"
                 )
             elif skip_count or fail_count:
@@ -2512,6 +2575,9 @@ def _render_module_memory(T: dict, defaults: dict):
     results = st.session_state.get("design_import_results") or []
     if results:
         st.markdown("**本次导入结果**")
+        failed_items = [r for r in results if r.get("status") == "failed"]
+        if failed_items:
+            st.caption(_get_text(T, "memory_tab.design_import_failed_list_title") or "失败清单（文件名 + 原因）")
         for r in results:
             status = r.get("status", "")
             if status == "success":

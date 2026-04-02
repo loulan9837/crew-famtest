@@ -412,6 +412,11 @@ def load_demand(file_path: str | None) -> str:
     return os.getenv("DEMAND", DEFAULT_DEMAND)
 
 
+def load_demand_from_quip(quip_url: str, return_title: bool = False) -> str | tuple[str, str]:
+    """兼容 `pipeline_service.run_quip_to_cases` 的导入；产品主流程已改为上传/粘贴，不再提供 Quip 拉取实现。"""
+    raise RuntimeError("Quip文档拉取已移除，请使用上传文件或粘贴文本导入需求。")
+
+
 # ---------------------------------------------------------------------------
 # Crew 构建（延迟初始化：仅在跑流程时检查 Key 并创建 LLM/Agents）
 # ---------------------------------------------------------------------------

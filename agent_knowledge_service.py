@@ -10,8 +10,6 @@ from datetime import datetime
 from typing import Any
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
-AGENT_KNOWLEDGE_PATH = os.path.join(CONFIG_DIR, "agent_knowledge.md")
-AGENT_KNOWLEDGE_META_PATH = os.path.join(CONFIG_DIR, "agent_knowledge_meta.json")
 PROJECT_MEMORY_PATH = os.path.join(CONFIG_DIR, "project_memory.md")
 MAX_INPUT_CHARS = 45000  # 控制 LLM 输入长度
 KNOWLEDGE_DAYS_STALE = 7
@@ -40,7 +38,11 @@ def _get_knowledge_paths(project_id: str | None = None) -> tuple[str, str]:
             os.path.join(CONFIG_DIR, "agent_knowledge_rm11.md"),
             os.path.join(CONFIG_DIR, "agent_knowledge_rm11_meta.json"),
         )
-    return AGENT_KNOWLEDGE_PATH, AGENT_KNOWLEDGE_META_PATH
+    # 与 RM11 一致使用 CONFIG_DIR 运行时拼接，便于测试隔离与目录变更
+    return (
+        os.path.join(CONFIG_DIR, "agent_knowledge.md"),
+        os.path.join(CONFIG_DIR, "agent_knowledge_meta.json"),
+    )
 
 
 def _get_raw_content_for_knowledge(project_id: str | None = None) -> str:
@@ -124,17 +126,22 @@ def is_knowledge_stale(project_id: str | None = None) -> bool:
 def build_agent_knowledge(
     gemini_key: str = "",
     gemini_model: str = "",
+    project_id: str | None = None,
 ) -> tuple[bool, str]:
     """
-    构建 Agent 知识库，覆盖写入 agent_knowledge.md。
+    构建 Agent 知识库，覆盖写入 agent_knowledge.md（或 RM11 对应文件）。
     返回 (是否成功, 错误信息或空字符串)。
+
+    project_id 显式传入时优先使用；为 None 时回退环境变量 APP_CURRENT_PROJECT。
     """
     key = (gemini_key or "").strip() or os.environ.get("GEMINI_API_KEY")
     if not key:
         return False, "请先配置 GEMINI_API_KEY"
 
-    # 当前项目：若调用方未显式传入，可通过环境变量 APP_CURRENT_PROJECT 约定
-    project_id = _normalize_project_id(os.environ.get("APP_CURRENT_PROJECT"))
+    if project_id is not None:
+        project_id = _normalize_project_id(project_id)
+    else:
+        project_id = _normalize_project_id(os.environ.get("APP_CURRENT_PROJECT"))
 
     raw_store = _get_raw_content_for_knowledge(project_id)
     raw_project = _load_project_memory(project_id)

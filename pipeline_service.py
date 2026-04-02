@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-业务逻辑层：四 Agent → 测试用例流水线
+业务逻辑层：Quip → 四 Agent → 测试用例流水线
 与 Streamlit UI 解耦，供 app_ui 调用。
-支持：文件上传（.md + .xlsx）、粘贴文本两种输入方式。
+支持：Quip 拉取、文件上传（.md + .xlsx）两种输入方式。
 """
 from __future__ import annotations
 
@@ -11,113 +11,29 @@ from datetime import datetime
 from typing import Any, TypedDict
 
 from crew_test import (
+    load_demand_from_quip,
     run_pipeline,
     _parse_markdown_tables,
     tables_to_text,
     export_tables_to_excel_bytes,
 )
+from memory_store import (
+    TEST_CASES_SOURCE_TYPE,
+    add_entry,
+    get_entry_content,
+)
 
 
-def _debug_save_parse_fail(raw_content: str) -> None:
-    """解析失败时保存原始内容到 output/parse_fail_debug.txt，便于排查。"""
-    try:
-        base = os.path.dirname(os.path.abspath(__file__))
-        out_dir = os.path.join(base, "output")
-        os.makedirs(out_dir, exist_ok=True)
-        debug_path = os.path.join(out_dir, "parse_fail_debug.txt")
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(debug_path, "a", encoding="utf-8") as f:
-            f.write(f"\n\n=== 解析失败 {ts} ===\n\n")
-            f.write((raw_content or "")[:8000])
-            f.write("\n")
-    except Exception:
-        pass
+class QuipToCasesResult(TypedDict):
+    ok: bool
+    error: str | None
+    last_run: dict[str, Any] | None
+    demand_snippet: str
+    demand_full: str
+    archive_suffix: str
+    archive_warning: str
 
 
-TABLE_REPAIR_PROMPT = """以下内容应为测试用例的 Markdown 表格，但可能存在格式错误。请将其修正为合法的 Markdown 表格并直接输出，不要任何说明、问候或前后文字。
-
-格式要求：
-- 每行必须以 | 开头、以 | 结尾
-- 表头固定为：| 序号 | 用例编号 | 主模块 | 子场景 | 用例概述 | 优先级 | 前置条件 | 测试步骤 | 预期结果 |
-- 第二行应为分隔行：| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-- 之后为数据行
-
-原始内容：
-"""
-
-
-def _repair_markdown_table_via_llm(
-    raw_text: str,
-    gemini_key: str,
-    gemini_model: str,
-) -> str:
-    """解析失败时，调用 LLM 尝试修正 Markdown 表格格式。返回修正后的文本，失败返回空串。"""
-    if not raw_text or not (gemini_key or "").strip():
-        return ""
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        from crew_test import _resolve_gemini_model
-
-        os.environ["GEMINI_API_KEY"] = gemini_key or os.environ.get("GEMINI_API_KEY", "")
-        # 通过统一的模型映射函数规避已下线/弃用模型（如 gemini-2.0-flash）
-        model = _resolve_gemini_model(
-            gemini_model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
-        )
-        if not os.environ.get("GEMINI_API_KEY"):
-            return ""
-        llm = ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=gemini_key,
-            temperature=0.1,
-        )
-        prompt = TABLE_REPAIR_PROMPT + (raw_text or "")[:6000]
-        resp = llm.invoke(prompt)
-        out = (getattr(resp, "content", None) or str(resp) or "").strip()
-        return out if out else ""
-    except Exception:
-        return ""
-
-
-def _log_pipeline_result(
-    tables_count: int,
-    has_excel: bool,
-    cases_md_len: int,
-    result_str_len: int,
-    step_outputs: list[dict],
-    raw_for_debug: str,
-) -> None:
-    """每次流水线结束写入日志；解析失败时额外保存原始内容。便于排查「未生成日志」或「未解析到表格」问题。"""
-    try:
-        base = os.path.dirname(os.path.abspath(__file__))
-        out_dir = os.path.join(base, "output")
-        os.makedirs(out_dir, exist_ok=True)
-        log_path = os.path.join(out_dir, "parse_fail_log.txt")
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        task_ids = [s.get("task", "") for s in step_outputs]
-        task3_len = 0
-        for s in step_outputs:
-            if s.get("task") == "task3":
-                task3_len = len(str(s.get("content", "")))
-                break
-        status = "解析成功" if tables_count else "解析失败"
-        raw_preview = repr((raw_for_debug or "")[:200])
-        lines = [
-            f"[{ts}] {status} | tables={tables_count} excel={has_excel}",
-            f"  日志路径: {os.path.abspath(log_path)}",
-            f"  step_outputs: {task_ids}",
-            f"  cases_md_len={cases_md_len} task3_len={task3_len} result_str_len={result_str_len}",
-            f"  raw_preview: {raw_preview}",
-            "",
-        ]
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        # 解析失败时额外保存完整原始内容
-        if tables_count == 0 and raw_for_debug:
-            _debug_save_parse_fail(raw_for_debug)
-    except Exception as e:
-        # 写入失败时至少输出到 stderr，便于在终端/系统日志中看到
-        import sys
-        print(f"[pipeline] 日志写入失败: {e}", file=sys.stderr)
 class UploadToCasesResult(TypedDict):
     ok: bool
     error: str | None
@@ -125,6 +41,143 @@ class UploadToCasesResult(TypedDict):
     issues: str
     cases_md: str
     excel_bytes: bytes | None
+
+
+def run_quip_to_cases(
+    quip_url: str,
+    quip_token: str,
+    gemini_key: str,
+    gemini_model: str,
+    export_quip: bool,
+    export_sheets: bool,
+    export_quip_target: str | None,
+    auto_archive: bool,
+    output_dir: str,
+) -> QuipToCasesResult:
+    """封装 Quip 拉取 + 四 Agent 流水线 + 可选归档的业务流程，不依赖 Streamlit。"""
+    # 环境变量注入：保持与命令行脚本一致的行为；兼容已弃用模型名
+    from crew_test import _resolve_gemini_model
+    os.environ["QUIP_ACCESS_TOKEN"] = quip_token or os.environ.get("QUIP_ACCESS_TOKEN", "")
+    os.environ["GEMINI_API_KEY"] = gemini_key or os.environ.get("GEMINI_API_KEY", "")
+    os.environ["GEMINI_MODEL"] = _resolve_gemini_model(
+        gemini_model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    )
+
+    if not os.environ.get("GEMINI_API_KEY"):
+        return {
+            "ok": False,
+            "error": "未配置 Gemini API Key",
+            "last_run": None,
+            "demand_snippet": "",
+            "demand_full": "",
+            "archive_suffix": "",
+            "archive_warning": "",
+        }
+
+    quip = (quip_url or "").strip()
+    if not quip:
+        return {
+            "ok": False,
+            "error": "需求文档链接不能为空",
+            "last_run": None,
+            "demand_snippet": "",
+            "demand_full": "",
+            "archive_suffix": "",
+            "archive_warning": "",
+        }
+
+    try:
+        demand, demand_title = load_demand_from_quip(quip, return_title=True)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"拉取文档失败: {e}",
+            "last_run": None,
+            "demand_snippet": "",
+            "demand_full": "",
+            "archive_suffix": "",
+            "archive_warning": "",
+        }
+
+    if not demand or not demand.strip():
+        return {
+            "ok": False,
+            "error": "文档内容为空",
+            "last_run": None,
+            "demand_snippet": "",
+            "demand_full": "",
+            "archive_suffix": "",
+            "archive_warning": "",
+        }
+
+    try:
+        out = run_pipeline(
+            demand,
+            output_dir=output_dir,
+            export_excel=True,
+            export_quip=export_quip or bool(export_quip_target and export_quip_target.strip()),
+            export_sheets=export_sheets,
+            export_quip_target=(export_quip_target or "").strip() or None,
+            demand_title=demand_title,
+            return_details=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"执行失败: {e}",
+            "last_run": None,
+            "demand_snippet": "",
+            "demand_full": demand,
+            "archive_suffix": "",
+            "archive_warning": "",
+        }
+
+    if isinstance(out, dict):
+        last_run: dict[str, Any] = dict(out)
+        last_run["demand_title"] = demand_title or ""
+    else:
+        last_run = {
+            "result_str": str(out),
+            "step_outputs": [],
+            "excel_path": None,
+            "quip_url": None,
+            "sheets_url": None,
+            "timestamp": "",
+            "txt_path": "",
+            "demand_title": demand_title or "",
+        }
+
+    archive_suffix = ""
+    archive_warning = ""
+    if auto_archive:
+        result_str = str(last_run.get("result_str", ""))
+        tables = _parse_markdown_tables(result_str)
+        if tables:
+            new_text = tables_to_text(tables)
+            section = f"\n\n【{datetime.now().strftime('%Y-%m-%d %H:%M')} 新增】\n{new_text}"
+            current = get_entry_content(TEST_CASES_SOURCE_TYPE, "full_regression") or ""
+            updated = (current + section).strip()
+            add_entry(
+                TEST_CASES_SOURCE_TYPE,
+                updated,
+                source_id="full_regression",
+                title="全回归测试用例",
+                summary=updated[:500],
+            )
+            archive_suffix = "，已归档到全回归用例"
+        else:
+            archive_warning = "归档失败：未解析到有效表格。"
+
+    snippet = demand[:500] + ("..." if len(demand) > 500 else "")
+    return {
+        "ok": True,
+        "error": None,
+        "last_run": last_run,
+        "demand_snippet": snippet,
+        "demand_full": demand,
+        "archive_suffix": archive_suffix,
+        "archive_warning": archive_warning,
+    }
 
 
 def run_upload_to_cases(
@@ -136,7 +189,7 @@ def run_upload_to_cases(
 ) -> UploadToCasesResult:
     """文件上传模式：基于 .md 需求 + .xlsx 既有用例，跑四 Agent 流水线。
     返回理解内容（task2）、问题点（task1）、新用例表（task3）、Excel 二进制。
-    仅支持 Excel 下载，不落盘、不导出 Sheets。"""
+    仅支持 Excel 下载，不落盘、不导出 Quip/Sheets。"""
     from crew_test import get_project_context_for_agent
 
     os.environ["GEMINI_API_KEY"] = gemini_key or os.environ.get("GEMINI_API_KEY", "")
@@ -174,6 +227,7 @@ def run_upload_to_cases(
             demand,
             output_dir="output",
             export_excel=False,
+            export_quip=False,
             export_sheets=False,
             project_context=base_ctx,
             return_details=True,
@@ -205,7 +259,7 @@ def run_upload_to_cases(
 
     for s in step_outputs:
         tid = s.get("task") or ""
-        content = str(s.get("content") or "").strip()
+        content = (s.get("content") or "").strip()
         if tid == "task1":
             issues = content
         elif tid == "task2":
@@ -213,36 +267,12 @@ def run_upload_to_cases(
         elif tid == "task3":
             cases_md = content
 
-    # 优先从 task3（用例表）解析；若无则从 result_str（task4 输出）尝试
+    # 优先从 task3（用例表）解析表格；若无则从 result_str（通常为 task4 输出，可能含修正后表格）尝试
     result_str = (out.get("result_str") or "").strip()
     tables = _parse_markdown_tables(cases_md) if (cases_md or "").strip() else []
     if not tables and result_str:
         tables = _parse_markdown_tables(result_str)
-
-    # 解析失败时：LLM 修表兜底
-    raw_for_repair = cases_md or result_str
-    if not tables and raw_for_repair and gemini_key:
-        repaired = _repair_markdown_table_via_llm(
-            raw_for_repair,
-            gemini_key=gemini_key,
-            gemini_model=gemini_model or "",
-        )
-        if repaired:
-            tables = _parse_markdown_tables(repaired)
-            if tables:
-                cases_md = repaired
-
     excel_bytes = export_tables_to_excel_bytes(tables) if tables else None
-
-    # 解析失败或需排查时：保存原始内容 + 写入日志（放宽条件，覆盖 cases_md/result_str 全空等情况）
-    _log_pipeline_result(
-        tables_count=len(tables) if tables else 0,
-        has_excel=excel_bytes is not None,
-        cases_md_len=len(cases_md or ""),
-        result_str_len=len(result_str or ""),
-        step_outputs=out.get("step_outputs") or [],
-        raw_for_debug=cases_md or result_str,
-    )
 
     return {
         "ok": True,

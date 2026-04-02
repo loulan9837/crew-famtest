@@ -6,7 +6,13 @@ config/defaults.json
 
 # 项目记忆为运行期生成/编辑，可不提交
 config/project_memory.md
+config/project_memory_rm11.md
 config/memory.db
+# Agent 知识库为运行期构建产物
+config/agent_knowledge.md
+config/agent_knowledge_meta.json
+config/agent_knowledge_rm11.md
+config/agent_knowledge_rm11_meta.json
 config/users.db
 
 # Python
