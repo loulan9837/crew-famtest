@@ -1,0 +1,47 @@
+# 对齐 docs/数据持久化与自动备份-方案.md §4：不经 Streamlit，直连 Postgres + R2。
+# 在仓库 Settings → Secrets 配置 DATABASE_URL_BACKUP、R2_*（见 docs/数据持久化与自动备份-Runbook.md）
+name: Cloud backup
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # schedule 仅跑在仓库默认分支；手动运行允许从当前分支触发（Secrets 仍以仓库配置为准）
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install PostgreSQL client and backup deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          pip install -r requirements-backup.txt
+
+      - name: Run cold backup
+        env:
+          DATABASE_URL_BACKUP: ${{ secrets.DATABASE_URL_BACKUP }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          BACKUP_R2_PREFIX: ${{ vars.BACKUP_R2_PREFIX }}
+          R2_DATASET_PREFIXES: ${{ vars.R2_DATASET_PREFIXES }}
+          R2_DATASET_MODE: ${{ vars.R2_DATASET_MODE }}
+          BACKUP_RETENTION_COMPLETED: ${{ vars.BACKUP_RETENTION_COMPLETED }}
+          BACKUP_SIZE_DROP_PCT: ${{ vars.BACKUP_SIZE_DROP_PCT }}
+          BACKUP_DEPLOYMENT_ENV: ${{ vars.BACKUP_DEPLOYMENT_ENV }}
+          BACKUP_DB_HOST_HINT: ${{ vars.BACKUP_DB_HOST_HINT }}
+          BACKUP_ALLOW_SIZE_DROP_OVERRIDE: ${{ secrets.BACKUP_ALLOW_SIZE_DROP_OVERRIDE }}
+        run: python scripts/cloud_backup/backup_run.py
