@@ -35,6 +35,12 @@ app:
 settings_tab:
   unsaved_draft_hint: "当前模型为未保存草稿，点击保存后才会写入本地。"
 
+sidebar:
+  cloud_memory_title: "云端记忆"
+  cloud_memory_caption: "最近写入Neon的记录，点击可填回「生成用例」粘贴区"
+  cloud_memory_btn_help: "填入生成页粘贴框并切换到粘贴模式"
+  cloud_memory_truncated: "云端记忆正文过长，已截断至前40万字符后填入粘贴区。"
+
 tabs:
   run: "生成用例"
   agents: "编辑 Agent"
@@ -102,6 +108,9 @@ agents_tab:
   save_fail_mismatch: "保存失败：写入内容与预期不一致，请刷新页面后重试"
 
 memory_tab:
+  cloud_memory_sync_checkbox: "导入成功后同步至云端（Neon数据库+R2对象存储）"
+  cloud_memory_sync_note: "需配置NEON_DATABASE_URL或DATABASE_URL及R2相关环境变量或StreamlitSecrets；与本地项目记忆并行，互不替代。"
+  cloud_memory_sync_partial: "云端同步：{detail}"
   section_title: "项目记忆"
   knowledge_section: "Agent 知识库"
   knowledge_last_updated: "知识库最后更新时间：{time}"

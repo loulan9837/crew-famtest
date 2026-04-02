@@ -1057,6 +1057,42 @@ def _get_text(data: dict, path: str, default: str = "") -> str:
     return data if isinstance(data, str) else default
 
 
+# 侧栏回填「生成用例」粘贴区时的最大字符数，防止超大文本撑爆Session与单次请求
+_CLOUD_MEMORY_INJECT_MAX_CHARS = 400_000
+
+
+def _render_cloud_memory_sidebar(T: dict, project_id: str) -> None:
+    """已配置 Neon+R2 时，侧栏展示最近云端记忆并可一键填回生成页粘贴区。"""
+    try:
+        from utils.cloud_memory import is_cloud_memory_configured, load_recent_history_from_neon
+    except ImportError:
+        return
+    if not is_cloud_memory_configured():
+        return
+    history = load_recent_history_from_neon(limit=5, project_id=project_id)
+    if not history:
+        return
+    st.subheader(_get_text(T, "sidebar.cloud_memory_title") or "云端记忆")
+    st.caption(_get_text(T, "sidebar.cloud_memory_caption") or "")
+    for item in history:
+        fn = (item.get("file_name") or "记录")[:40]
+        ts = (item.get("created_at") or "")[:16].replace("T", " ")
+        label = f"📄 {ts} {fn}"
+        bid = int(item.get("id") or 0)
+        if st.button(
+            label,
+            key=f"sidebar_cloud_mem_{_normalize_project_id(project_id)}_{bid}",
+            help=_get_text(T, "sidebar.cloud_memory_btn_help") or "",
+        ):
+            raw = (item.get("raw_content") or "").strip()
+            if len(raw) > _CLOUD_MEMORY_INJECT_MAX_CHARS:
+                raw = raw[:_CLOUD_MEMORY_INJECT_MAX_CHARS]
+                st.session_state["_cloud_memory_truncated_notice"] = True
+            st.session_state["_cloud_memory_apply_payload"] = {"content": raw}
+            st.session_state["current_page"] = MODULE_RUN
+            st.rerun()
+
+
 def _render_main_app(T: dict, cookies=None):
     """主应用：侧栏导航 + 主区内容。"""
     app_title = _get_text(T, "app.title") or "用例工坊 · AI 测试协作平台"
@@ -1183,6 +1219,7 @@ def _render_main_app(T: dict, cookies=None):
                     st.rerun()
 
         st.caption(f"当前项目：{_get_project_display_name(current_project)}")
+        _render_cloud_memory_sidebar(T, current_project)
         st.divider()
 
         st.markdown(f"**{app_title}**")
@@ -1263,6 +1300,19 @@ def _render_main_app(T: dict, cookies=None):
 
 def _render_module_run(T: dict, defaults: dict):
     """工作台模块：上传 / 粘贴 → 四 Agent → 测试用例。"""
+    pl = st.session_state.pop("_cloud_memory_apply_payload", None)
+    if isinstance(pl, dict) and (pl.get("content") or "").strip():
+        st.session_state["run_paste_content"] = pl["content"]
+        _persist_widget_state("run_paste_content", project_scoped=True)
+        st.session_state["run_demand_source"] = "paste"
+        _persist_widget_state("run_demand_source", project_scoped=True)
+
+    if st.session_state.pop("_cloud_memory_truncated_notice", False):
+        st.warning(
+            _get_text(T, "sidebar.cloud_memory_truncated")
+            or "云端记忆正文过长，已截断至前40万字符后填入粘贴区。"
+        )
+
     st.caption(_get_text(T, "run_tab.page_caption") or "从需求文档生成测试用例，支持上传或粘贴，导出 Excel。")
     st.markdown("<div style='margin-bottom:0.5rem'></div>", unsafe_allow_html=True)
 
@@ -1989,6 +2039,23 @@ def _render_module_memory(T: dict, defaults: dict):
             )
         )
 
+    cloud_sync_ok = False
+    try:
+        from utils.cloud_memory import is_cloud_memory_configured
+
+        if is_cloud_memory_configured():
+            if "cloud_memory_sync_enabled" not in st.session_state:
+                st.session_state["cloud_memory_sync_enabled"] = True
+            st.checkbox(
+                _get_text(T, "memory_tab.cloud_memory_sync_checkbox")
+                or "导入成功后同步至云端（Neon数据库+R2对象存储）",
+                key="cloud_memory_sync_enabled",
+            )
+            st.caption(_get_text(T, "memory_tab.cloud_memory_sync_note") or "")
+            cloud_sync_ok = bool(st.session_state.get("cloud_memory_sync_enabled", True))
+    except ImportError:
+        cloud_sync_ok = False
+
     # Agent 知识库区块
     try:
         from agent_knowledge_service import (
@@ -2195,6 +2262,25 @@ def _render_module_memory(T: dict, defaults: dict):
                 with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
                     _generate_entry_summary(rowid, demand_paste.strip(), defaults.get("gemini_key", ""))
                 st.success("已导入，可在上方搜索查看")
+                if cloud_sync_ok:
+                    try:
+                        from utils.cloud_memory import sync_text_demand_to_cloud
+
+                        fn = (demand_title_input or "").strip() or "需求文档"
+                        ok_c, msg_c = sync_text_demand_to_cloud(
+                            file_name=fn,
+                            content=demand_paste.strip(),
+                            project_id=project_id,
+                        )
+                        if not ok_c:
+                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
+                            st.warning(tpl.replace("{detail}", msg_c))
+                        elif "跳过" not in msg_c:
+                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
+                            st.caption(tpl.replace("{detail}", msg_c))
+                    except Exception as ex:
+                        tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
+                        st.warning(tpl.replace("{detail}", str(ex)))
             st.rerun()
         else:
             st.error(_get_text(T, "memory_tab.import_required") or "请粘贴需求文档内容")
@@ -2501,6 +2587,7 @@ def _render_module_memory(T: dict, defaults: dict):
                 {"name": i.get("name", ""), "status": "failed", "message": i.get("reason", "")}
                 for i in pre_failed
             ]
+            cloud_sync_notes: list[str] = []
 
             import hashlib
             import time
@@ -2613,8 +2700,29 @@ def _render_module_memory(T: dict, defaults: dict):
                     with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
                         _generate_entry_summary(rowid, full_description, gemini_key)
                     results.append({"name": file_name, "status": "success", "message": "已解析并写入项目记忆"})
+                    if cloud_sync_ok:
+                        try:
+                            from utils.cloud_memory import sync_design_file_to_cloud
+
+                            ok_c, msg_c = sync_design_file_to_cloud(
+                                file_name=file_name,
+                                raw_bytes=raw_bytes,
+                                parsed_content=full_description,
+                                project_id=project_id,
+                            )
+                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
+                            if ok_c:
+                                if "跳过" not in msg_c:
+                                    cloud_sync_notes.append(tpl.replace("{detail}", f"{file_name} — {msg_c}"))
+                            else:
+                                cloud_sync_notes.append(tpl.replace("{detail}", f"{file_name} — {msg_c}"))
+                        except Exception as ex:
+                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
+                            cloud_sync_notes.append(tpl.replace("{detail}", f"{file_name} — {ex}"))
 
             st.session_state["design_import_results"] = results
+            for _note in cloud_sync_notes:
+                st.caption(_note)
 
             if import_count:
                 st.success(
