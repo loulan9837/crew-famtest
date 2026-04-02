@@ -140,6 +140,15 @@ def _get_project_display_name(project_id: str) -> str:
     return pid
 
 
+def _deploy_workspace_likely_ephemeral() -> bool:
+    """Streamlit Community Cloud 等环境将代码置于 /mount/src/，容器磁盘不持久；重启后 memory.db 等会丢失。"""
+    try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        return root.startswith("/mount/src/")
+    except Exception:
+        return False
+
+
 def _get_persist_key(widget_key: str, project_scoped: bool = True) -> str:
     """生成跨页面保留输入用的 persist key。
 
@@ -1969,6 +1978,16 @@ def _render_module_memory(T: dict, defaults: dict):
     if not MEMORY_AVAILABLE:
         st.info("当前运行环境未启用项目记忆存储（例如 sqlite3 不可用），项目记忆功能暂不可用，但生成用例功能不受影响。")
         return
+
+    if _deploy_workspace_likely_ephemeral():
+        st.warning(
+            _get_text(
+                T,
+                "memory_tab.ephemeral_storage_warning",
+                "当前为Streamlit Community Cloud等临时磁盘部署：项目记忆与设计图保存在实例本地（config/memory.db或JSON降级文件），"
+                "应用Reboot、重新部署或实例回收后**会丢失**已导入内容。需长期保留请改用带持久化数据库/磁盘的自有部署，并定期导出全回归用例等数据。",
+            )
+        )
 
     # Agent 知识库区块
     try:

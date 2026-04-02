@@ -118,6 +118,7 @@ memory_tab:
   search_first: "输入关键词搜索，或从下方导入后再搜。"
   search_empty: "未找到匹配文档"
   caption_browse: "导入的需求文档供 Agent 参考；先搜索查看已有内容，再按需导入。"
+  ephemeral_storage_warning: "当前为Streamlit Community Cloud等临时磁盘部署：项目记忆与设计图保存在实例本地（config/memory.db或JSON降级文件），应用Reboot、重新部署或实例回收后**会丢失**已导入内容。需长期保留请改用带持久化数据库/磁盘的自有部署，并定期导出全回归用例等数据。"
   import_section: "导入需求"
   demand_paste_label: "粘贴需求文档内容"
   demand_paste_placeholder: "在此粘贴 PRD 或需求文档…"
