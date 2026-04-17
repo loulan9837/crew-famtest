@@ -55,4 +55,8 @@ jobs:
           BACKUP_DEPLOYMENT_ENV: ${{ vars.BACKUP_DEPLOYMENT_ENV }}
           BACKUP_DB_HOST_HINT: ${{ vars.BACKUP_DB_HOST_HINT }}
           BACKUP_ALLOW_SIZE_DROP_OVERRIDE: ${{ secrets.BACKUP_ALLOW_SIZE_DROP_OVERRIDE }}
-        run: python scripts/cloud_backup/backup_run.py
+        run: |
+          # 强制将 PG 17 的二进制目录插到系统 PATH 的最前面！夺取 pg_dump 的控制权！
+          export PATH=/usr/lib/postgresql/17/bin:$PATH
+
+          python scripts/cloud_backup/backup_run.py
