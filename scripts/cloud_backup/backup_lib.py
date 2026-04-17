@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import tempfile
 import urllib.parse
@@ -174,13 +175,25 @@ def _key_join(prefix: str, *parts: str) -> str:
     return f"{base}/{rest}" if base else rest
 
 
+def resolve_pg_dump_binary() -> str:
+    """解析 pg_dump 可执行路径：优先环境变量 PG_DUMP，其次 PATH（apt 安装后通常为 /usr/bin/pg_dump）。"""
+    override = (os.environ.get("PG_DUMP") or "").strip()
+    if override:
+        return override
+    which = shutil.which("pg_dump")
+    if which:
+        return which
+    return "pg_dump"
+
+
 def pg_dump_gzip(database_url: str, out_gz_path: str, log: Callable[[str], None]) -> None:
     """使用 pg_dump 明文格式经 gzip 压缩（便于跨版本与 inspect）。"""
+    pg_dump_bin = resolve_pg_dump_binary()
     masked = mask_database_url(database_url)
-    log(f"pg_dump starting (db={masked})")
+    log(f"pg_dump starting binary={pg_dump_bin} (db={masked})")
     with gzip.open(out_gz_path, "wb", compresslevel=6) as gz:
         proc = subprocess.run(
-            ["pg_dump", "--no-owner", "--no-acl", database_url],
+            [pg_dump_bin, "--no-owner", "--no-acl", database_url],
             stdout=gz,
             stderr=subprocess.PIPE,
             check=False,

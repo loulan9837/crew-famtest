@@ -218,7 +218,7 @@ def run_upload_to_cases(
             "excel_bytes": None,
         }
 
-    base_ctx = (project_context or "").strip() or get_project_context_for_agent()
+    base_ctx = (project_context or "").strip() or get_project_context_for_agent(rag_query=demand)
     if (existing_cases or "").strip():
         base_ctx = (base_ctx + "\n\n【既有测试用例】\n\n" + existing_cases.strip()).strip()
 

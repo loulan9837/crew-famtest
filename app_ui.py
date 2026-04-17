@@ -777,6 +777,27 @@ def _handle_full_regression_import(
     except ImportError:
         pass
 
+    # 6. 全回归向量索引（Neon pgvector）：供生成用例时按需求语义检索相关行
+    try:
+        from utils.vector_service import is_case_rag_enabled, reindex_full_regression_from_markdown
+
+        if is_case_rag_enabled():
+            _rag_spin = _get_text(T, "memory_tab.case_rag_reindex_spinner") or "正在为用例行构建语义检索索引…"
+            with st.spinner(_rag_spin):
+                _rk, _rm = reindex_full_regression_from_markdown(
+                    project_id,
+                    merged_content,
+                    (defaults.get("gemini_key") or os.environ.get("GEMINI_API_KEY") or "").strip(),
+                )
+            if not _rk:
+                st.caption(
+                    (_get_text(T, "memory_tab.case_rag_reindex_note") or "语义检索索引未更新：{detail}").replace(
+                        "{detail}", str(_rm)[:200]
+                    )
+                )
+    except ImportError:
+        pass
+
     if added_rows > 0:
         st.success(f"已导入 {rows} 行，其中新增 {added_rows} 行，全回归聚合用例已更新。")
     else:

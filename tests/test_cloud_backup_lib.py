@@ -9,6 +9,7 @@ from backup_lib import (  # type: ignore[import-not-found]
     mask_database_url,
     new_backup_run_id,
     parse_dataset_prefixes,
+    resolve_pg_dump_binary,
     size_drop_blocks_new_dump,
     validate_completed_manifest,
 )
@@ -77,3 +78,18 @@ def test_new_backup_run_id_format():
     rid = new_backup_run_id()
     assert "_" in rid
     assert len(rid) > 12
+
+
+def test_resolve_pg_dump_binary_env_override(monkeypatch):
+    monkeypatch.setenv("PG_DUMP", "/custom/pg_dump")
+    assert resolve_pg_dump_binary() == "/custom/pg_dump"
+
+
+def test_resolve_pg_dump_binary_falls_back_to_which():
+    import shutil
+
+    w = shutil.which("pg_dump")
+    if w:
+        assert resolve_pg_dump_binary() == w
+    else:
+        assert resolve_pg_dump_binary() == "pg_dump"

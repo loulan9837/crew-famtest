@@ -1315,8 +1315,21 @@ def load_fambase_modules_for_agent(path: str | None = None, project_id: str | No
         return ""
 
 
-def get_project_context_for_agent(include_store: bool = True) -> str:
+def _truncate_full_regression_block(fr: str, max_c: int = 120_000) -> str:
+    """无需求 query 时限制全回归聚合注入长度，避免超大 Excel 撑爆上下文。"""
+    fr = (fr or "").strip()
+    if not fr:
+        return ""
+    if len(fr) <= max_c:
+        return "【全回归测试用例（聚合）】\n\n" + fr
+    return "【全回归测试用例（聚合，已截断）】\n\n" + fr[:max_c] + "\n\n...(已截断)"
+
+
+def get_project_context_for_agent(include_store: bool = True, rag_query: str | None = None) -> str:
     """获取供 Agent 使用的项目上下文：知识库存在时用 project_memory + agent_knowledge，否则沿用原逻辑。
+
+    rag_query：当前需求/任务文本；若提供且已配置 Neon+pgvector，则对全回归聚合做语义检索，仅注入最相关约 25 条用例行，
+    避免整表塞进模型上下文。未提供时仍注入聚合内容但做长度截断。
 
     为兼容双项目工作台，当前项目通过环境变量 APP_CURRENT_PROJECT 约定：
     - 未显式设置时，默认视为 FAMBASE；
@@ -1351,16 +1364,34 @@ def get_project_context_for_agent(include_store: bool = True) -> str:
         if store_ctx:
             md_ctx = (md_ctx + "\n\n【近期需求与产出记录】\n" + store_ctx).strip()
 
-        # 全回归用例：只从聚合视图 full_regression 读取，避免遍历所有 full_regression:* 存档记录
+        # 全回归用例：只从聚合视图 full_regression 读取；有 rag_query 时优先走向量检索片段
         full_reg = get_entry_content(
             TEST_CASES_SOURCE_TYPE,
             "full_regression",
             project_id=project_id,
         )
         if full_reg and full_reg.strip():
-            md_ctx = (
-                md_ctx + "\n\n【全回归测试用例（聚合）】\n" + full_reg.strip()
-            ).strip()
+            fr = full_reg.strip()
+            gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            rq = (rag_query or "").strip()
+            block = ""
+            if rq and gemini_key:
+                try:
+                    from utils.vector_service import retrieve_relevant_case_context
+
+                    block = retrieve_relevant_case_context(
+                        project_id,
+                        rq,
+                        fr,
+                        gemini_key,
+                        top_k=25,
+                    )
+                except Exception:
+                    block = _truncate_full_regression_block(fr)
+            else:
+                block = _truncate_full_regression_block(fr)
+            if block:
+                md_ctx = (md_ctx + "\n\n" + block).strip()
     except ImportError:
         pass
     return md_ctx
@@ -1472,7 +1503,11 @@ def run_pipeline(
         )
 
     use_config = bool(agents_config_path or os.path.isfile(AGENTS_CONFIG_PATH))
-    proj_ctx_raw = project_context if project_context is not None else get_project_context_for_agent()
+    proj_ctx_raw = (
+        project_context
+        if project_context is not None
+        else get_project_context_for_agent(rag_query=demand)
+    )
     stream = return_details
 
     # 入参脱敏：仅对传入大模型的内容做掩码处理，本地保存仍保留原始需求文本

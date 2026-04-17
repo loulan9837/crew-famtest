@@ -122,6 +122,8 @@ memory_tab:
   knowledge_refresh_fail: "更新失败：{err}"
   knowledge_refresh_after_regression: "正在根据最新全回归用例更新Agent知识库…"
   knowledge_refresh_after_regression_fail: "知识库自动更新失败，导入已成功。可在项目记忆页点击「刷新知识库」重试。详情：{err}"
+  case_rag_reindex_spinner: "正在为用例行构建语义检索索引…"
+  case_rag_reindex_note: "语义检索索引未更新：{detail}"
   search_label: "搜索"
   search_placeholder: "输入关键词（如：直播、禁言、AB test）"
   search_first: "输入关键词搜索，或从下方导入后再搜。"
