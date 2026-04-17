@@ -24,13 +24,16 @@ jobs:
 
       - name: Install PostgreSQL client and backup deps
         run: |
-          # Ubuntu 24.04：PGDG keyrings + signed-by（无 apt-key）
+          # 1. 创建存放密钥的安全目录
           sudo install -m 0755 -d /etc/apt/keyrings
 
+          # 2. 下载官方公钥并使用 gpg dearmor 转换为安全格式
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
 
+          # 3. 写入 apt 源，并严格指定 signed-by 校验路径
           echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
 
+          # 4. 更新源并强制安装 17 版本客户端
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
 
