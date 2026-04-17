@@ -178,6 +178,20 @@ memory_tab:
   design_mockup_pdf_truncated: "PDF 超过 5 页，已只处理前 5 页"
   design_mockup_parse_fail: "解析失败，请稍后重试"
 
+requirement_review:
+  nav_label: "需求评审"
+  section_title: "需求评审"
+  section_desc: "粘贴需求正文，一键列出逻辑模糊或风险相关的核心疑问点（本会话内保留粘贴与结果）。"
+  paste_label: "需求内容"
+  paste_placeholder: "在此粘贴需求文档或 PRD 片段…"
+  run_btn: "开始评审"
+  empty_warning: "请先粘贴需求内容"
+  no_key_error: "请先在「设置」中配置 Gemini API Key，或保存到本地默认凭据。"
+  spinner: "正在评审需求…"
+  error_tpl: "评审失败：{err}"
+  result_heading: "核心疑问点"
+  empty_result_hint: "完成评审后，结果将显示在下方。"
+
 risk_report:
   title: "需求风险分析"
   section_title: "需求风险分析"

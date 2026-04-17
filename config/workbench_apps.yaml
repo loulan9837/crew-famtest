@@ -19,18 +19,23 @@ apps:
     label: "需求风险分析"
     order: 3
     enabled: true
+  - id: requirement_review
+    label_key: requirement_review.nav_label
+    label: "需求评审"
+    order: 4
+    enabled: true
   - id: memory
     label_key: tabs.memory
     label: "项目记忆"
-    order: 4
+    order: 5
     enabled: true
   - id: chat
     label_key: tabs.chat
     label: "文档问答"
-    order: 5
+    order: 6
     enabled: true
   - id: settings
     label_key: app.settings
     label: "设置"
-    order: 6
+    order: 7
     enabled: true

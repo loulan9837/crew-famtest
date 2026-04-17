@@ -54,3 +54,52 @@ def generate_risk_assessment_report(
 
     msg = llm.invoke(prompt)
     return (msg.content or "").strip()
+
+
+def generate_requirement_review_questions(
+    document_content: str,
+    gemini_model: str = "",
+    gemini_key: str = "",
+) -> str:
+    """
+    需求评审：单次 LLM 调用，返回 Markdown 形式的「核心疑问点」。
+    与 generate_risk_assessment_report 独立，不共用入口。
+    """
+    if not (document_content or "").strip():
+        raise ValueError("文档内容为空")
+
+    import time
+
+    from crew_test import _resolve_gemini_model, desensitize_for_llm
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    key = (gemini_key or "").strip() or os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise ValueError("请先配置 GEMINI_API_KEY")
+
+    model = _resolve_gemini_model(
+        (gemini_model or "").strip() or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    )
+    safe_doc = desensitize_for_llm(document_content.strip())[:30000]
+
+    prompt = f"""你是一位资深测试工程师。请审阅以下需求，指出其中逻辑模糊、不完整或存在风险的地方，直接列出几条核心疑问点，不要废话。
+
+【需求文档】
+{safe_doc}"""
+
+    llm = ChatGoogleGenerativeAI(model=model, google_api_key=key, temperature=0.3)
+
+    for attempt in range(3):
+        try:
+            msg = llm.invoke(prompt)
+            out = (msg.content or "").strip()
+            if not out:
+                raise ValueError("模型返回为空")
+            return out
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "503" in err_str or "timeout" in err_str.lower():
+                if attempt < 2:
+                    time.sleep(5)
+                    continue
+            raise

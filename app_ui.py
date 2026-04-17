@@ -56,7 +56,7 @@ except Exception as e:
     # 则将项目记忆相关功能降级为不可用状态，避免拖垮整个应用。
     MEMORY_AVAILABLE = False
 from pipeline_service import run_upload_to_cases
-from risk_report_service import generate_risk_assessment_report
+from risk_report_service import generate_requirement_review_questions, generate_risk_assessment_report
 
 CONFIG_DIR = os.path.dirname(AGENTS_CONFIG_PATH)
 DEFAULTS_PATH = os.path.join(CONFIG_DIR, "defaults.json")
@@ -110,6 +110,7 @@ MODULE_AGENTS = "agents"
 MODULE_MEMORY = "memory"
 MODULE_CHAT = "chat"
 MODULE_RISK_REPORT = "risk_report"
+MODULE_REQUIREMENT_REVIEW = "requirement_review"
 MODULE_CASE_CHAT = "case_chat"
 MODULE_SETTINGS = "settings"
 
@@ -244,6 +245,8 @@ def _has_unsaved_project_state() -> bool:
         return True
     if s.get(_scoped_upload_cache_key("pcb_memory_test_cases_upload")):
         return True
+    if (s.get("requirement_review_paste") or "").strip():
+        return True
     if (s.get("test_cases_paste") or "").strip():
         return True
     if (s.get("chat_paste_doc") or "").strip():
@@ -271,6 +274,7 @@ def _clear_project_related_state() -> None:
         "app_memory_",
         "app_doc_chat_",
         "app_risk_report_",
+        "app_requirement_review_",
         "case_chat_",
     ]
     for key in list(st.session_state.keys()):
@@ -555,6 +559,8 @@ def _load_workbench_apps(T: dict) -> list[dict]:
     return [
         {"id": MODULE_RUN, "label": _get_text(T, "tabs.run") or "生成用例"},
         {"id": MODULE_AGENTS, "label": _get_text(T, "tabs.agents") or "编辑 Agent"},
+        {"id": MODULE_RISK_REPORT, "label": _get_text(T, "risk_report.title") or "需求风险分析"},
+        {"id": MODULE_REQUIREMENT_REVIEW, "label": _get_text(T, "requirement_review.nav_label") or "需求评审"},
         {"id": MODULE_MEMORY, "label": _get_text(T, "tabs.memory") or "项目记忆"},
         {"id": MODULE_CHAT, "label": _get_text(T, "tabs.chat") or "文档问答"},
         {"id": MODULE_CASE_CHAT, "label": _get_text(T, "tabs.case_chat") or "用例对话"},
@@ -1246,7 +1252,14 @@ def _render_main_app(T: dict, cookies=None):
         st.markdown("**工作台**")
         for app in workbench_apps:
             module_id = app["id"]
-            if module_id in (MODULE_RUN, MODULE_RISK_REPORT, MODULE_MEMORY, MODULE_CHAT, MODULE_CASE_CHAT):
+            if module_id in (
+                MODULE_RUN,
+                MODULE_RISK_REPORT,
+                MODULE_REQUIREMENT_REVIEW,
+                MODULE_MEMORY,
+                MODULE_CHAT,
+                MODULE_CASE_CHAT,
+            ):
                 if st.button(
                     app["label"],
                     key=f"nav_{module_id}",
@@ -1297,6 +1310,8 @@ def _render_main_app(T: dict, cookies=None):
         _render_module_run(T, defaults)
     elif current_page == MODULE_RISK_REPORT:
         _render_module_risk_report(T, defaults)
+    elif current_page == MODULE_REQUIREMENT_REVIEW:
+        _render_module_requirement_review(T, defaults)
     elif current_page == MODULE_AGENTS:
         _render_module_agents(T)
     elif current_page == MODULE_MEMORY:
@@ -1821,6 +1836,57 @@ def _render_upload_mode(T: dict, defaults: dict):
         )
     else:
         st.caption("未解析到 Markdown 表格，无法导出 Excel。")
+
+
+def _render_module_requirement_review(T: dict, defaults: dict):
+    """工作台模块：需求评审。仅粘贴 + 单次 LLM，产出疑问点 Markdown。"""
+    result_key = _get_module_state_key(MODULE_REQUIREMENT_REVIEW, "result_md")
+
+    st.subheader(_get_text(T, "requirement_review.section_title") or "需求评审")
+    st.caption(_get_text(T, "requirement_review.section_desc") or "")
+
+    _restore_widget_state("requirement_review_paste", "")
+    st.text_area(
+        _get_text(T, "requirement_review.paste_label") or "需求内容",
+        height=240,
+        key="requirement_review_paste",
+        placeholder=_get_text(T, "requirement_review.paste_placeholder") or "",
+        on_change=_make_persist_callback("requirement_review_paste"),
+    )
+
+    if st.button(
+        _get_text(T, "requirement_review.run_btn") or "开始评审",
+        type="primary",
+        key="requirement_review_run",
+    ):
+        text = (st.session_state.get("requirement_review_paste") or "").strip()
+        if not text:
+            st.warning(_get_text(T, "requirement_review.empty_warning") or "请先粘贴需求内容")
+        else:
+            gemini_key = (defaults.get("gemini_key") or "").strip()
+            if not gemini_key:
+                st.error(_get_text(T, "requirement_review.no_key_error") or "请配置 Gemini API Key")
+            else:
+                try:
+                    with st.spinner(_get_text(T, "requirement_review.spinner") or "正在评审需求…"):
+                        md = generate_requirement_review_questions(
+                            text,
+                            gemini_model=defaults.get("gemini_model", ""),
+                            gemini_key=gemini_key,
+                        )
+                    st.session_state[result_key] = md
+                except ValueError as e:
+                    st.warning(str(e))
+                except Exception as e:
+                    tpl = _get_text(T, "requirement_review.error_tpl") or "评审失败：{err}"
+                    st.error(tpl.replace("{err}", str(e)))
+
+    res = (st.session_state.get(result_key) or "").strip()
+    if res:
+        st.subheader(_get_text(T, "requirement_review.result_heading") or "核心疑问点")
+        st.markdown(res)
+    else:
+        st.caption(_get_text(T, "requirement_review.empty_result_hint") or "")
 
 
 def _render_module_risk_report(T: dict, defaults: dict):
