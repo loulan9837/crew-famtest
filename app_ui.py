@@ -2814,7 +2814,6 @@ def _render_module_memory(T: dict, defaults: dict):
             cloud_sync_notes: list[str] = []
 
             import hashlib
-            import time
 
             total = len(files_to_process)
             for idx, uploaded_file in enumerate(files_to_process, start=1):
