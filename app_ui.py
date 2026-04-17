@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
 import sys
 import time
+import inspect
 from typing import Any
 
 import streamlit as st
@@ -725,6 +727,9 @@ def _handle_full_regression_import(
         st.info("导入内容与现有聚合结果一致，未产生新增用例。")
         return
 
+    # 云端/知识库/RAG 等非致命说明统一收拢到文末一条摘要（PRD §7.5，仅展示层）
+    _import_extra_lines: list[str] = []
+    _import_need_warning = False
     try:
         from utils.cloud_memory import is_cloud_memory_configured, sync_text_demand_to_cloud
 
@@ -736,9 +741,11 @@ def _handle_full_regression_import(
                 source_type="full_regression",
             )
             if not ok:
-                st.warning(f"本地聚合成功，但云端备份异常：{msg}")
+                _import_extra_lines.append(f"本地聚合成功，但云端备份异常：{msg}")
+                _import_need_warning = True
     except Exception as e:
-        st.warning(f"触发云端备份时发生致命错误：{e}")
+        _import_extra_lines.append(f"触发云端备份时发生致命错误：{e}")
+        _import_need_warning = True
 
     # 4. 标记上下文缓存与知识库为脏，并生成 Librarian 摘要
     try:
@@ -771,7 +778,8 @@ def _handle_full_regression_import(
             _kr_fail = _get_text(T, "memory_tab.knowledge_refresh_after_regression_fail") or (
                 "知识库自动更新失败，导入已成功。可在项目记忆页点击「刷新知识库」重试。详情：{err}"
             )
-            st.warning(_kr_fail.replace("{err}", kb_err))
+            _import_extra_lines.append(_kr_fail.replace("{err}", kb_err))
+            _import_need_warning = True
         else:
             st.session_state[_get_module_state_key(MODULE_MEMORY, "kb_auto_done")] = True
     except ImportError:
@@ -790,7 +798,7 @@ def _handle_full_regression_import(
                     (defaults.get("gemini_key") or os.environ.get("GEMINI_API_KEY") or "").strip(),
                 )
             if not _rk:
-                st.caption(
+                _import_extra_lines.append(
                     (_get_text(T, "memory_tab.case_rag_reindex_note") or "语义检索索引未更新：{detail}").replace(
                         "{detail}", str(_rm)[:200]
                     )
@@ -799,9 +807,14 @@ def _handle_full_regression_import(
         pass
 
     if added_rows > 0:
-        st.success(f"已导入 {rows} 行，其中新增 {added_rows} 行，全回归聚合用例已更新。")
+        _main_fb = f"已导入 {rows} 行，其中新增 {added_rows} 行，全回归聚合用例已更新。"
     else:
-        st.success(f"已导入 {rows} 行，全回归聚合用例已更新。")
+        _main_fb = f"已导入 {rows} 行，全回归聚合用例已更新。"
+    _full_fb = _main_fb + ("\n\n" + "\n".join(_import_extra_lines) if _import_extra_lines else "")
+    if _import_need_warning:
+        st.warning(_full_fb)
+    else:
+        st.success(_full_fb)
 
 
 def _find_latest_design_import_time(file_hash_prefix: str, project_id: str | None = None) -> str | None:
@@ -1100,6 +1113,29 @@ def _get_text(data: dict, path: str, default: str = "") -> str:
     return data if isinstance(data, str) else default
 
 
+def _render_empty_state_card(title: str, body: str) -> None:
+    """PRD 空态：标题+一句说明（仅展示层）。"""
+    if not (title or body):
+        return
+    st.markdown(
+        '<div class="card-style">'
+        f'<p style="font-weight:600;margin:0 0 0.35rem;color:#0f172a;">{html.escape(title)}</p>'
+        f'<p style="margin:0;font-size:0.92rem;color:#64748b;line-height:1.5;">{html.escape(body)}</p>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _st_chat_input_kwargs(*, disabled: bool) -> dict:
+    """兼容旧版Streamlit：仅当支持disabled时传入，避免破坏运行环境。"""
+    try:
+        if "disabled" in inspect.signature(st.chat_input).parameters:
+            return {"disabled": disabled}
+    except (TypeError, ValueError):
+        pass
+    return {}
+
+
 # 侧栏回填「生成用例」粘贴区时的最大字符数，防止超大文本撑爆Session与单次请求
 _CLOUD_MEMORY_INJECT_MAX_CHARS = 400_000
 
@@ -1109,13 +1145,15 @@ def _render_cloud_memory_sidebar(T: dict, project_id: str) -> None:
     try:
         from utils.cloud_memory import is_cloud_memory_configured, load_recent_history_from_neon
     except ImportError:
+        st.caption(_get_text(T, "sidebar.cloud_memory_not_configured") or "")
         return
     if not is_cloud_memory_configured():
+        st.caption(_get_text(T, "sidebar.cloud_memory_not_configured") or "未配置云端同步，此项为空")
         return
     history = load_recent_history_from_neon(limit=5, project_id=project_id)
     if not history:
+        st.caption(_get_text(T, "sidebar.cloud_memory_empty") or "暂无最近云端记录")
         return
-    st.subheader(_get_text(T, "sidebar.cloud_memory_title") or "云端记忆")
     st.caption(_get_text(T, "sidebar.cloud_memory_caption") or "")
     for item in history:
         fn = (item.get("file_name") or "记录")[:40]
@@ -1264,11 +1302,6 @@ def _render_main_app(T: dict, cookies=None):
                     st.rerun()
 
         st.caption(f"当前项目：{_get_project_display_name(current_project)}")
-        _render_cloud_memory_sidebar(T, current_project)
-        st.divider()
-
-        st.markdown(f"**{app_title}**")
-        st.caption(_get_text(T, "app.slogan") or "需求即输入，用例即输出，AI 全程协同一键生成")
         st.divider()
         st.markdown("**工作台**")
         for app in workbench_apps:
@@ -1302,15 +1335,22 @@ def _render_main_app(T: dict, cookies=None):
                     st.session_state["current_page"] = module_id
                     st.rerun()
         st.divider()
-        # 版本号：便于验证线上代码已成功更新
+        st.caption(_get_text(T, "app.sidebar_tagline_short") or app_title)
+        with st.expander(
+            _get_text(T, "sidebar.cloud_memory_expander_label") or "云端记忆快捷",
+            expanded=False,
+        ):
+            _render_cloud_memory_sidebar(T, current_project)
+        st.divider()
+        # 版本号：沉底、弱视觉权重
         ver_info = _load_version()
         ver_str = str(ver_info.get("version", "") or "").strip()
         build_str = str(ver_info.get("build_time", "") or "").strip()
         if ver_str:
             ver_label = _get_text(T, "app.version_label") or "版本"
-            ver_display = f"{ver_label}: {ver_str}"
+            ver_display = f"{ver_label} {ver_str}"
             if build_str:
-                ver_display += f" ({build_str})"
+                ver_display += f" · {build_str}"
             st.caption(ver_display)
 
     # 主区内容
@@ -1383,10 +1423,10 @@ def _render_module_run(T: dict, defaults: dict):
         on_change=_make_persist_callback("run_demand_source"),
     )
 
-    # F5-2 配置状态提示
+    # F5-2 配置状态：单行轻量提示（全站UI与文案优化-PRD）
     _has_key = bool(defaults.get("gemini_key"))
     _config_status = (_get_text(T, "run_tab.config_status_ok") or "Token/Key 已配置") if _has_key else (_get_text(T, "run_tab.config_status_missing") or "请在「设置」中配置 Token 与 Gemini API Key")
-    st.caption(f"📌 {_config_status}")
+    st.caption(_config_status)
 
     if demand_source == "upload":
         _render_upload_mode(T, defaults)
@@ -1424,7 +1464,12 @@ def _render_run_history(T: dict) -> None:
         project_id=_get_current_project(),
     )
     if not records:
-        st.info(_get_text(T, "run_tab.history_empty_state") or "暂无生成记录，上传或粘贴需求后开始生成")
+        _render_empty_state_card(
+            _get_text(T, "run_tab.history_empty_title") or "还没有生成记录",
+            _get_text(T, "run_tab.history_empty_body")
+            or _get_text(T, "run_tab.history_empty_state")
+            or "上传或粘贴需求后开始生成。",
+        )
         return
 
     for rec in records:
@@ -1551,7 +1596,8 @@ def _render_paste_mode(T: dict, defaults: dict):
         (i for i, (k, _) in enumerate(gemini_models_list) if k == (defaults.get("gemini_model") or default_model)),
         0,
     )
-    with st.expander("模型配置", expanded=not bool(defaults.get("gemini_key"))):
+    _exp_label = _get_text(T, "run_tab.model_expander_label") or "模型配置"
+    with st.expander(_exp_label, expanded=not bool(defaults.get("gemini_key"))):
         _restore_widget_state("run_paste_model")
         gemini_model = st.selectbox(
             "Gemini 模型",
@@ -1572,11 +1618,9 @@ def _render_paste_mode(T: dict, defaults: dict):
         else:
             st.session_state[_paste_error_key] = None
             st.session_state[_paste_key] = True
-            _ph = st.empty()
             try:
-                with _ph.container():
-                    st.progress(0.3, text="分析文档并生成用例…")
-                with st.spinner("正在生成…"):
+                _spin_msg = _get_text(T, "run_tab.run_spinner") or "正在生成测试用例…"
+                with st.spinner(_spin_msg):
                     result = run_upload_to_cases(
                         demand_md=pasted,
                         existing_cases=existing_cases,
@@ -1590,7 +1634,6 @@ def _render_paste_mode(T: dict, defaults: dict):
                 else:
                     st.session_state[_paste_result_key] = result
                     st.session_state[_paste_error_key] = None
-                    _ph.progress(1.0, text="完成")
                     st.success("生成完成")
                     # 标题：首行或前 20 字
                     _lines = pasted.splitlines()
@@ -1632,7 +1675,6 @@ def _render_paste_mode(T: dict, defaults: dict):
                 st.session_state[_paste_error_key] = str(e)
                 st.error(str(e))
             finally:
-                _ph.empty()
                 st.session_state[_paste_key] = False
 
     _last_err = st.session_state.get(_paste_error_key)
@@ -1644,7 +1686,11 @@ def _render_paste_mode(T: dict, defaults: dict):
 
     r = st.session_state.get(_paste_result_key)
     if not r:
-        st.info("粘贴需求内容后点击「开始生成」。仅展示新测试用例表与 Excel 下载。")
+        _render_empty_state_card(
+            _get_text(T, "run_tab.empty_result_paste_title") or "尚未生成用例",
+            _get_text(T, "run_tab.empty_result_paste_body")
+            or "粘贴需求后点击「开始生成」，结果与下载区将出现在此处。",
+        )
         return
 
     st.divider()
@@ -1743,7 +1789,8 @@ def _render_upload_mode(T: dict, defaults: dict):
     gemini_models_list, default_model = _load_models()
     _model_opts = [m[0] for m in gemini_models_list]
     _model_idx = next((i for i, (k, _) in enumerate(gemini_models_list) if k == (defaults.get("gemini_model") or default_model)), 0)
-    with st.expander("模型配置", expanded=not bool(defaults.get("gemini_key"))):
+    _u_exp = _get_text(T, "run_tab.model_expander_label") or "模型配置"
+    with st.expander(_u_exp, expanded=not bool(defaults.get("gemini_key"))):
         _restore_widget_state("run_upload_model")
         gemini_model = st.selectbox(
             "Gemini 模型",
@@ -1765,11 +1812,9 @@ def _render_upload_mode(T: dict, defaults: dict):
         else:
             st.session_state[_upload_error_key] = None
             st.session_state[_upload_key] = True
-            _ph = st.empty()
             try:
-                with _ph.container():
-                    st.progress(0.3, text="分析文档并生成用例…")
-                with st.spinner("正在生成…"):
+                _spin_u = _get_text(T, "run_tab.run_spinner") or "正在生成测试用例…"
+                with st.spinner(_spin_u):
                     result = run_upload_to_cases(
                         demand_md=demand_md,
                         existing_cases=existing_cases,
@@ -1783,7 +1828,6 @@ def _render_upload_mode(T: dict, defaults: dict):
                 else:
                     st.session_state[_upload_result_key] = result
                     st.session_state[_upload_error_key] = None
-                    _ph.progress(1.0, text="完成")
                     st.success("生成完成")
                     # 写入历史
                     _demand_title = "上传需求"
@@ -1827,7 +1871,6 @@ def _render_upload_mode(T: dict, defaults: dict):
                 st.session_state[_upload_error_key] = str(e)
                 st.error(str(e))
             finally:
-                _ph.empty()
                 st.session_state[_upload_key] = False
 
     _last_err = st.session_state.get(_upload_error_key)
@@ -1839,7 +1882,11 @@ def _render_upload_mode(T: dict, defaults: dict):
 
     r = st.session_state.get(_upload_result_key)
     if not r:
-        st.info("上传 .md/.docx 需求文档或 .xlsx 既有用例后点击「开始生成」。仅展示新测试用例表与 Excel 下载。")
+        _render_empty_state_card(
+            _get_text(T, "run_tab.empty_result_upload_title") or "尚未生成用例",
+            _get_text(T, "run_tab.empty_result_upload_body")
+            or "上传需求文档后点击「开始生成」，结果与下载区将出现在此处。",
+        )
         return
 
     st.divider()
@@ -2135,14 +2182,22 @@ def _render_module_memory(T: dict, defaults: dict):
         return
 
     if _deploy_workspace_likely_ephemeral():
-        st.warning(
-            _get_text(
-                T,
-                "memory_tab.ephemeral_storage_warning",
-                "当前为Streamlit Community Cloud等临时磁盘部署：项目记忆与设计图保存在实例本地（config/memory.db或JSON降级文件），"
-                "应用Reboot、重新部署或实例回收后**会丢失**已导入内容。需长期保留请改用带持久化数据库/磁盘的自有部署，并定期导出全回归用例等数据。",
-            )
+        st.caption(
+            _get_text(T, "memory_tab.ephemeral_storage_summary")
+            or "临时磁盘部署：实例重启或回收后本地导入可能丢失；长期请用持久化部署并定期导出。"
         )
+        with st.expander(
+            _get_text(T, "memory_tab.ephemeral_storage_detail_expander") or "查看部署风险详情",
+            expanded=False,
+        ):
+            st.warning(
+                _get_text(
+                    T,
+                    "memory_tab.ephemeral_storage_warning",
+                    "当前为Streamlit Community Cloud等临时磁盘部署：项目记忆与设计图保存在实例本地（config/memory.db或JSON降级文件），"
+                    "应用Reboot、重新部署或实例回收后**会丢失**已导入内容。需长期保留请改用带持久化数据库/磁盘的自有部署，并定期导出全回归用例等数据。",
+                )
+            )
 
     cloud_configured = False
     cloud_sync_ok = False
@@ -2483,7 +2538,9 @@ def _render_module_memory(T: dict, defaults: dict):
                     pass
                 with st.spinner(_get_text(T, "memory_tab.agent_summary_pending") or "生成摘要中…"):
                     _generate_entry_summary(rowid, demand_paste.strip(), defaults.get("gemini_key", ""))
-                st.success("已导入，可在上方搜索查看")
+                _done = _get_text(T, "memory_tab.import_demand_done") or "已导入，可在上方搜索查看。"
+                _lines = [_done]
+                _need_w = False
                 if cloud_sync_ok:
                     try:
                         from utils.cloud_memory import sync_text_demand_to_cloud
@@ -2494,15 +2551,24 @@ def _render_module_memory(T: dict, defaults: dict):
                             content=demand_paste.strip(),
                             project_id=project_id,
                         )
-                        if not ok_c:
-                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
-                            st.warning(tpl.replace("{detail}", msg_c))
-                        elif "跳过" not in msg_c:
-                            tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
-                            st.caption(tpl.replace("{detail}", msg_c))
-                    except Exception as ex:
                         tpl = _get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}"
-                        st.warning(tpl.replace("{detail}", str(ex)))
+                        if not ok_c:
+                            _lines.append(tpl.replace("{detail}", msg_c))
+                            _need_w = True
+                        elif "跳过" not in (msg_c or ""):
+                            _lines.append(tpl.replace("{detail}", msg_c))
+                    except Exception as ex:
+                        _lines.append(
+                            (_get_text(T, "memory_tab.cloud_memory_sync_partial") or "云端同步：{detail}").replace(
+                                "{detail}", str(ex)
+                            )
+                        )
+                        _need_w = True
+                _body = "\n\n".join(_lines)
+                if _need_w:
+                    st.warning(_body)
+                else:
+                    st.success(_body)
             st.rerun()
         else:
             st.error(_get_text(T, "memory_tab.import_required") or "请粘贴需求文档内容")
@@ -3090,8 +3156,8 @@ def _render_module_memory(T: dict, defaults: dict):
 
 def _render_module_chat(T: dict, defaults: dict):
     """工作台模块：文档问答。"""
-    st.subheader(_get_text(T, "chat_tab.section_title") or "与产品文档管理 Agent 沟通")
-    st.caption(_get_text(T, "chat_tab.section_desc") or "Agent 可理解全部需求文档。选择项目整体记忆或手动粘贴文档内容。")
+    st.subheader(_get_text(T, "chat_tab.section_title") or "文档问答")
+    st.caption(_get_text(T, "chat_tab.section_desc") or "基于已导入需求或粘贴正文向Agent提问。")
 
     chat_options = ["memory", "paste"] if MEMORY_AVAILABLE else ["paste"]
     _def_chat = "memory" if MEMORY_AVAILABLE else "paste"
@@ -3107,14 +3173,19 @@ def _render_module_chat(T: dict, defaults: dict):
         on_change=_make_persist_callback("chat_doc_source"),
     )
     doc_context = ""
+    _memory_hint = ""
     if doc_source == "memory":
         if not MEMORY_AVAILABLE:
-            st.info(_get_text(T, "chat_tab.doc_source_empty") or "当前运行环境未启用项目记忆存储，请使用「粘贴文档内容」模式。")
+            _memory_hint = _get_text(T, "chat_tab.doc_source_unavailable") or (
+                _get_text(T, "chat_tab.doc_source_empty") or ""
+            )
         else:
             try:
                 from memory_store import get_all_demands_full_for_chat
             except ImportError:
-                st.info(_get_text(T, "chat_tab.doc_source_empty") or "当前运行环境未启用项目记忆存储，请使用「粘贴文档内容」模式。")
+                _memory_hint = _get_text(T, "chat_tab.doc_source_unavailable") or (
+                    _get_text(T, "chat_tab.doc_source_empty") or ""
+                )
                 doc_context = ""
             else:
                 doc_context = get_all_demands_full_for_chat(
@@ -3122,7 +3193,7 @@ def _render_module_chat(T: dict, defaults: dict):
                     project_id=_get_current_project(),
                 ).strip()
                 if not doc_context:
-                    st.info(_get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档。请先在「项目记忆」页导入。")
+                    _memory_hint = _get_text(T, "chat_tab.doc_source_empty") or "项目记忆暂无需求文档。请先在「项目记忆」页导入。"
     else:
         _restore_widget_state("chat_paste_doc", "")
         doc_context = st.text_area(
@@ -3131,6 +3202,9 @@ def _render_module_chat(T: dict, defaults: dict):
             key="chat_paste_doc",
             on_change=_make_persist_callback("chat_paste_doc"),
         ).strip()
+
+    if _memory_hint:
+        st.caption(_memory_hint)
 
     if "app_doc_chat_messages" not in st.session_state:
         st.session_state["app_doc_chat_messages"] = []
@@ -3168,7 +3242,11 @@ def _render_module_chat(T: dict, defaults: dict):
             st.session_state["app_doc_chat_messages"].append({"role": "assistant", "content": reply})
             st.rerun()
 
-    user_input = st.chat_input(_get_text(T, "chat_tab.chat_placeholder") or "输入问题…")
+    _no_ctx = not bool(doc_context)
+    if _no_ctx and not _memory_hint:
+        st.caption(_get_text(T, "chat_tab.no_context_hint") or "无可用文档正文，无法提问。")
+    _ph_chat = _get_text(T, "chat_tab.chat_placeholder") or "输入问题…"
+    user_input = st.chat_input(_ph_chat, **_st_chat_input_kwargs(disabled=_no_ctx))
     if user_input and doc_context:
         st.session_state["app_doc_chat_messages"].append({"role": "user", "content": user_input})
         with st.chat_message("assistant"):
@@ -3187,7 +3265,7 @@ def _render_module_chat(T: dict, defaults: dict):
         st.session_state["app_doc_chat_messages"].append({"role": "assistant", "content": reply})
         st.rerun()
     elif user_input and not doc_context:
-        st.warning(_get_text(T, "chat_tab.doc_source_empty") or "请先选择并加载文档内容。")
+        st.warning(_get_text(T, "chat_tab.no_context_hint") or "请先加载文档正文。")
 
 
 def _parse_next_case_id_from_md(md: str) -> str | None:
@@ -3491,10 +3569,15 @@ def _case_chat_send_message(user_msg: str, defaults: dict, messages_key: str) ->
 
 def _render_module_settings(T: dict, defaults: dict):
     """工作台模块：设置（模型、凭证）。"""
-    if st.button(_get_text(T, "app.back_btn") or "← 返回", key="settings_back"):
+    if st.button(
+        _get_text(T, "app.back_btn") or "← 返回",
+        key="settings_back",
+        type="secondary",
+        help=_get_text(T, "settings_tab.back_secondary_help") or "",
+    ):
         st.session_state["current_page"] = MODULE_RUN
         st.rerun()
-    st.caption("配置 API 凭证与模型，保存后生成用例时将自动使用。")
+    st.caption(_get_text(T, "settings_tab.page_intro") or "配置 API 凭证与模型，保存后生成用例时将自动使用。")
     _init_settings_persist_from_defaults(defaults)
     st.caption(_get_text(T, "settings_tab.unsaved_draft_hint") or "当前模型为未保存草稿，点击保存后才会写入本地。")
     with st.container():
