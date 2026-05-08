@@ -849,7 +849,7 @@ def _render_incremental_section(T: dict, defaults: dict) -> None:
     )
 
     last_instr = st.session_state.get("incremental_last_instruction", "")
-    _pk_inc = _persist_ui_key("incremental_instruction")
+    _pk_inc = _get_persist_key("incremental_instruction")
     if _pk_inc not in st.session_state and last_instr:
         st.session_state[_pk_inc] = last_instr
     _restore_widget_state("incremental_instruction", "")
