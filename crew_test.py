@@ -306,6 +306,14 @@ def _run_crew_sequential(
         desc = desc.replace("{project_context}", proj_ctx)
         desc = _sanitize_task_template(desc, _allowed_tpl)
         exp = _sanitize_task_template((t.get("expected_output") or "").strip(), _allowed_tpl)
+        # 兜底：若模板中仍出现未知占位符（如 {passcode}），为其注入空值，避免 CrewAI 缺参报错中断
+        unknown_tpl_vars = sorted(
+            {
+                tok
+                for tok in re.findall(r"\{([a-zA-Z0-9_]+)\}", f"{desc}\n{exp}")
+                if tok not in _allowed_tpl
+            }
+        )
         task_obj = Task(
             description=desc,
             expected_output=exp,
@@ -326,6 +334,8 @@ def _run_crew_sequential(
             inputs["task2_output"] = escape_curly_braces_for_crewai_inputs(outputs["task2"])
         if outputs.get("task3"):
             inputs["task3_output"] = escape_curly_braces_for_crewai_inputs(outputs["task3"])
+        for uv in unknown_tpl_vars:
+            inputs.setdefault(uv, "")
 
         result = crew.kickoff(inputs=inputs)
         out_str = str(getattr(result, "raw", result))
