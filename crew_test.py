@@ -278,6 +278,18 @@ def _run_crew_sequential(
 
         desc = (t.get("description") or "").strip()
         desc = desc.replace("{project_context}", proj_ctx)
+        # 诊断日志：线上排查模板变量缺失（如 {passcode}）来源
+        try:
+            _tokens = sorted(set(re.findall(r"\{([a-zA-Z0-9_]+)\}", desc)))
+        except Exception:
+            _tokens = []
+        _known_tokens = {"prd_content", "task1_output", "task2_output", "task3_output"}
+        _unknown_tokens = [x for x in _tokens if x not in _known_tokens]
+        print(
+            "[TemplateDebug]"
+            f" task={tid} tokens={_tokens} unknown={_unknown_tokens}"
+            f" has_passcode_token={('passcode' in [x.lower() for x in _tokens]) or ('{passcode}' in desc.lower())}"
+        )
 
         task_obj = Task(
             description=desc,
@@ -300,7 +312,15 @@ def _run_crew_sequential(
         if outputs.get("task3"):
             inputs["task3_output"] = escape_curly_braces_for_crewai_inputs(outputs["task3"])
 
-        result = crew.kickoff(inputs=inputs)
+        try:
+            result = crew.kickoff(inputs=inputs)
+        except Exception as e:
+            print(
+                "[TemplateDebug]"
+                f" kickoff_failed task={tid} inputs_keys={sorted(inputs.keys())}"
+                f" err={e}"
+            )
+            raise
         out_str = str(getattr(result, "raw", result))
 
         out_str = (out_str or "").strip()
