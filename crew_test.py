@@ -216,7 +216,6 @@ def _build_crew_from_config(
         )
     task_map: dict[str, Task] = {}
     _allowed_tpl = {"project_context", "prd_content", "task1_output", "task2_output", "task3_output"}
-    _allowed_tpl = {"project_context", "prd_content", "task1_output", "task2_output", "task3_output"}
     for t in tasks_cfg:
         tid = t.get("id") or ""
         agent_id = t.get("agent_id") or ""
@@ -294,6 +293,7 @@ def _run_crew_sequential(
     proj_ctx = escape_curly_braces_for_crewai_inputs((project_context or "").strip())
     outputs: dict[str, str] = {}
     step_outputs: list[dict[str, str]] = []
+    _allowed_tpl = {"project_context", "prd_content", "task1_output", "task2_output", "task3_output"}
 
     for t in tasks_cfg:
         tid = t.get("id") or ""
