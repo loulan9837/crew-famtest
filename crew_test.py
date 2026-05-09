@@ -59,6 +59,28 @@ def _resolve_gemini_model(model: str) -> str:
     return _DEPRECATED_GEMINI_MODEL_MAP.get(m, m or "gemini-2.5-flash-lite")
 
 
+def _sanitize_task_template(text: str, allowed_placeholders: set[str]) -> str:
+    """转义任务模板中的字面花括号，仅保留允许的占位符（如 {prd_content}）。
+
+    背景：CrewAI 会把 `{name}` 当作模板变量。若文案中出现 `{passcode}` 这类示例字段，
+    会触发 Missing required template variable。这里通过“先占位后转义再还原”防止误判。
+    """
+    raw = str(text or "")
+    if not raw:
+        return ""
+    sentinels: dict[str, str] = {}
+    out = raw
+    for i, key in enumerate(sorted(allowed_placeholders)):
+        token = "{" + key + "}"
+        sentinel = f"__TPL_SENTINEL_{i}__"
+        sentinels[sentinel] = token
+        out = out.replace(token, sentinel)
+    out = escape_curly_braces_for_crewai_inputs(out)
+    for sentinel, token in sentinels.items():
+        out = out.replace(sentinel, token)
+    return out
+
+
 def _build_crew_agent_llm(
     model_name: str,
     gemini_api_key: str,
@@ -193,6 +215,8 @@ def _build_crew_from_config(
             verbose=True,
         )
     task_map: dict[str, Task] = {}
+    _allowed_tpl = {"project_context", "prd_content", "task1_output", "task2_output", "task3_output"}
+    _allowed_tpl = {"project_context", "prd_content", "task1_output", "task2_output", "task3_output"}
     for t in tasks_cfg:
         tid = t.get("id") or ""
         agent_id = t.get("agent_id") or ""
@@ -204,11 +228,13 @@ def _build_crew_from_config(
             "{project_context}",
             escape_curly_braces_for_crewai_inputs(project_context.strip()),
         )
+        desc = _sanitize_task_template(desc, _allowed_tpl)
+        exp = _sanitize_task_template((t.get("expected_output") or "").strip(), _allowed_tpl)
         ctx_ids = t.get("context") or []
         context_tasks = [task_map[cid] for cid in ctx_ids if cid in task_map]
         task_map[tid] = Task(
             description=desc,
-            expected_output=(t.get("expected_output") or "").strip(),
+            expected_output=exp,
             agent=agent,
             context=context_tasks if context_tasks else None,
         )
@@ -278,22 +304,11 @@ def _run_crew_sequential(
 
         desc = (t.get("description") or "").strip()
         desc = desc.replace("{project_context}", proj_ctx)
-        # 诊断日志：线上排查模板变量缺失（如 {passcode}）来源
-        try:
-            _tokens = sorted(set(re.findall(r"\{([a-zA-Z0-9_]+)\}", desc)))
-        except Exception:
-            _tokens = []
-        _known_tokens = {"prd_content", "task1_output", "task2_output", "task3_output"}
-        _unknown_tokens = [x for x in _tokens if x not in _known_tokens]
-        print(
-            "[TemplateDebug]"
-            f" task={tid} tokens={_tokens} unknown={_unknown_tokens}"
-            f" has_passcode_token={('passcode' in [x.lower() for x in _tokens]) or ('{passcode}' in desc.lower())}"
-        )
-
+        desc = _sanitize_task_template(desc, _allowed_tpl)
+        exp = _sanitize_task_template((t.get("expected_output") or "").strip(), _allowed_tpl)
         task_obj = Task(
             description=desc,
-            expected_output=(t.get("expected_output") or "").strip(),
+            expected_output=exp,
             agent=agent,
             context=None,
         )
@@ -312,15 +327,7 @@ def _run_crew_sequential(
         if outputs.get("task3"):
             inputs["task3_output"] = escape_curly_braces_for_crewai_inputs(outputs["task3"])
 
-        try:
-            result = crew.kickoff(inputs=inputs)
-        except Exception as e:
-            print(
-                "[TemplateDebug]"
-                f" kickoff_failed task={tid} inputs_keys={sorted(inputs.keys())}"
-                f" err={e}"
-            )
-            raise
+        result = crew.kickoff(inputs=inputs)
         out_str = str(getattr(result, "raw", result))
 
         out_str = (out_str or "").strip()
