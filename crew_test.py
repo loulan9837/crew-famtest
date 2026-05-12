@@ -1035,7 +1035,10 @@ def generate_incremental_cases(
     header_str = " | ".join(base_header)
     prompt.append(f"2. 输出格式必须为 Markdown 表格，表头严格为：| {header_str} |（列数和列名必须与基线表完全一致）。")
     prompt.append("3. 中英/数字边界不得出现空格，例如：点击Save按钮。英文内部保留原始空格。")
-    prompt.append("4. 预期结果绝对去动词化：不得出现“点击”“查看”等动作词，仅描述状态/展示/置灰等；多条预期结果时分行并使用 1. 2. 编号，单条时禁止前置编号。")
+    prompt.append(
+        "4. 预期结果绝对去动词化：不得出现“点击”“查看”等动作词，仅描述状态/展示/置灰等；"
+        "多条时同单元格「1.xxx；2.yyy」全角分号串联，单条禁止「1.」前缀；允许使用<br>，导出时会转为单元格内换行。"
+    )
     prompt.append("5. 必须显式对比现有测试用例，严禁重复已有场景。")
     prompt.append("6. 必须考虑断网、杀进程、边界值等极端场景，以及新逻辑对既有流程的潜在回归风险。")
     prompt.append("7. 若发现增量指令引入的新行为与原用例中已有行为存在冲突，必须补充回归/冲突验证用例。")
@@ -1158,11 +1161,14 @@ def generate_incremental_cases(
 def _sanitize_cell_for_excel(value: Any) -> str:
     """防止 Excel 公式注入：以 = + - @ 开头的内容前置单引号。
     将 <br> 转为换行符，使 Excel 单元格内正确显示换行。
+    将「1.xxx；2.yyy」类全角分号后接「数字.」转为换行，便于同单元格内多条列举复制后多行显示。
     仅用于导出到 Excel/CSV 等外部文件，对内存中的原始内容不做修改。"""
     s = "" if value is None else str(value)
     s = s.strip()
     # <br> / <br/> / <br /> 转为换行符，Excel 单元格内可正确显示
     s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    # 全角分号后接「数字.」视为下一条列举，导出为单元格内换行（与 agents 预期结果「1.xxx；2.yyy」一致）
+    s = re.sub(r"；\s*(\d+\.)", r"\n\1", s)
     if s and s[0] in ("=", "+", "-", "@"):
         return "'" + s
     return s
